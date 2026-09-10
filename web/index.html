@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>性能监测平台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">P</span><div><strong>PerfPilot</strong><small>本机性能实验室</small></div></div>
+      <nav>
+        <button class="nav-item active" data-view="overview"><span>⌂</span>监测首页</button>
+        <button class="nav-item" data-view="devices"><span>▣</span>设备管理</button>
+        <button class="nav-item" data-view="monitor"><span>◒</span>实时监控</button>
+        <button class="nav-item" data-view="reports"><span>▤</span>检测报告</button>
+        <button class="nav-item" data-view="settings"><span>⚙</span>系统设置</button>
+      </nav>
+      <div class="agent-status"><span class="status-dot"></span><div><b>Agent 已连接</b><small>本机服务 · v0.1.0</small></div></div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar"><div><p class="eyebrow">PERFORMANCE LAB / LOCAL AGENT</p><h1 id="page-title">监测首页</h1></div><div class="top-actions"><span id="connection-pill" class="pill muted">正在检测设备</span><button class="icon-button" title="刷新数据" id="refresh-button">↻</button><div class="avatar">Y</div></div></header>
+
+      <section id="overview-view" class="view active-view">
+        <div class="hero-strip"><div><p class="eyebrow coral">READY WHEN YOU ARE</p><h2>把一次性能测试，变成一条清晰的证据链。</h2><p class="hero-copy">选择设备和应用，先做能力预检，再进入实时监控。所有数据留在这台电脑上。</p></div><div class="hero-art"><span class="pulse-ring"></span><span class="hero-number">01</span><small>LOCAL<br>SESSION</small></div></div>
+        <div class="step-grid">
+          <section class="panel step-panel"><div class="step-heading"><span class="step-number">01</span><div><p class="eyebrow">DEVICE</p><h3>连接设备</h3></div><span id="device-state" class="state-badge waiting">检测中</span></div><div id="device-list" class="device-list"><div class="empty-state">正在扫描 USB / ADB 设备…</div></div></section>
+          <section class="panel step-panel"><div class="step-heading"><span class="step-number">02</span><div><p class="eyebrow">APPLICATION</p><h3>选择监测应用</h3></div></div><div class="search-box"><span>⌕</span><input id="app-search" placeholder="搜索应用名称或 Bundle ID"></div><div id="app-list" class="app-list"><div class="empty-state">先选择一个设备</div></div></section>
+          <section class="panel step-panel config-panel"><div class="step-heading"><span class="step-number">03</span><div><p class="eyebrow">CAPABILITY CHECK</p><h3>监测配置</h3></div></div><p class="muted-copy">能力预检会决定真实可用的指标，不会用 0 填充缺失数据。</p><div id="capability-list" class="capability-list"></div><button id="start-button" class="primary-button" disabled><span>开始监测</span><b>→</b></button></section>
+        </div>
+      </section>
+
+      <section id="monitor-view" class="view">
+        <div class="monitor-header panel"><div><div class="live-label"><span class="live-dot"></span><span id="monitor-status">正在监测</span></div><h2 id="monitor-app">等待目标应用</h2><p id="monitor-device" class="muted-copy"></p></div><div class="monitor-meta"><div><small>SESSION TIME</small><strong id="elapsed">00:00</strong></div><div><small>DATA POINTS</small><strong id="sample-count">0</strong></div><button id="stop-button" class="danger-button">停止监测</button></div></div>
+        <div class="metric-grid"><article class="metric-card fps-card"><div class="metric-label"><span>FPS</span><em class="quality available">LIVE</em></div><strong id="fps-value">--</strong><small>当前帧率 · 平滑窗口</small><div class="metric-foot"><span>平均 <b id="fps-average">--</b></span><span>最低 <b id="fps-min">--</b></span><span>状态 <b class="good">流畅</b></span></div></article><article class="metric-card"><div class="metric-label"><span>APP CPU</span><em class="quality available">AVAILABLE</em></div><strong id="cpu-value">--</strong><small>目标进程 CPU 占用</small><div class="mini-track"><i id="cpu-bar"></i></div></article><article class="metric-card"><div class="metric-label"><span>MEMORY</span><em class="quality available">RSS</em></div><strong id="memory-value">--</strong><small>目标进程常驻内存</small><div class="metric-foot"><span>峰值 <b id="memory-peak">--</b></span></div></article><article class="metric-card"><div class="metric-label"><span>GPU</span><em class="quality degraded">DEGRADED</em></div><strong id="gpu-value">--</strong><small>取决于设备能力</small><div class="metric-foot"><span>不支持时显示原因</span></div></article></div>
+        <div class="chart-grid"><article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">FRAME PACING</p><h3>FPS 趋势</h3></div><span class="chart-value" id="chart-fps-label">--</span></div><canvas id="fps-chart" height="170"></canvas></article><article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">RESOURCE LOAD</p><h3>CPU / Memory</h3></div><span class="chart-value" id="chart-resource-label">等待数据</span></div><canvas id="resource-chart" height="170"></canvas></article></div>
+        <div class="lower-grid"><section class="panel events-panel"><div class="section-heading"><div><p class="eyebrow">SIGNALS</p><h3>异常事件</h3></div><span id="event-count" class="count-badge">0</span></div><div id="event-list" class="event-list"><div class="empty-state">采集中，异常会出现在这里</div></div></section><section class="panel capability-summary"><div class="section-heading"><div><p class="eyebrow">CAPABILITY</p><h3>指标覆盖</h3></div></div><div id="monitor-capabilities" class="coverage-list"></div></section></div>
+      </section>
+
+      <section id="devices-view" class="view"><div class="page-intro"><p class="eyebrow">CONNECTED HARDWARE</p><h2>设备管理</h2><p>当前 Agent 发现的设备与配对状态。</p></div><div id="devices-table" class="panel devices-table"></div></section>
+      <section id="reports-view" class="view"><div class="page-intro"><p class="eyebrow">SESSION ARCHIVE</p><h2>检测报告</h2><p>每次停止监测都会保存一条历史记录，报告文件可从这里打开。</p></div><div id="report-list" class="report-list"><div class="empty-state">暂无历史报告</div></div></section>
+      <section id="settings-view" class="view"><div class="page-intro"><p class="eyebrow">LOCAL CONFIGURATION</p><h2>系统设置</h2><p>当前版本使用本机 Agent 管理设备连接和数据采集。</p></div><div class="panel settings-card"><div><h3>采样策略</h3><p>CPU / Memory 1s · FPS 1s 窗口 · 报告 HTML</p></div><span class="state-badge available">已启用</span></div></section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
