@@ -84,6 +84,23 @@ async def _list_ios_devices_async() -> list[dict[str, Any]]:
         if not serial:
             continue
         cached = _INFO_CACHE.get(serial) or {}
+        lockdown = None
+        try:
+            lockdown = await _open_lockdown(serial)
+            values = getattr(lockdown, "all_values", None) or {}
+            if isinstance(values, dict):
+                cached = {
+                    "name": _safe_text(values.get("DeviceName") or "iPhone"),
+                    "model": _safe_text(values.get("ProductType") or "iPhone"),
+                    "version": _safe_text(values.get("ProductVersion") or ""),
+                    "connection": _safe_text(values.get("ConnectionType") or "USB"),
+                }
+                _INFO_CACHE[serial] = cached
+        except Exception as error:
+            get_logger("ios").debug("[IosScan] lockdown info unavailable udid=%s err=%s", serial, error)
+        finally:
+            if lockdown is not None:
+                await _close(lockdown)
         connection = _safe_text(getattr(item, "connection_type", None) or cached.get("connection") or "USB")
         found.append(
             {
@@ -91,7 +108,7 @@ async def _list_ios_devices_async() -> list[dict[str, Any]]:
                 "name": cached.get("name") or "iPhone",
                 "model": cached.get("model") or "iPhone",
                 "platform": "ios",
-                "version": cached.get("version") or "iOS",
+                "version": cached.get("version") or "",
                 "connection": connection,
                 "status": "connected",
             }

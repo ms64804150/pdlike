@@ -14,7 +14,9 @@ except ImportError:
 
 ROOT = Path(SPECPATH).resolve().parent
 datas = [
-    (str(ROOT / "web"), "web"),
+    (str(ROOT / "web" / "index.html"), "web"),
+    (str(ROOT / "web" / "app.js"), "web"),
+    (str(ROOT / "web" / "styles.css"), "web"),
     (str(ROOT / "adb_fps.py"), "."),
     (str(ROOT / "ios_perf.py"), "."),
 ]

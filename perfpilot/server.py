@@ -437,8 +437,13 @@ def serve(host: str = "127.0.0.1", port: int = 8765, on_ready: Any = None) -> No
     except KeyboardInterrupt:
         print("\nPerfPilot Agent 正在停止…")
     finally:
-        manager.shutdown()
-        server.shutdown()
+        try:
+            # serve_forever() has already returned here. Close the listening
+            # socket before collector cleanup so a stuck child cannot keep
+            # the Agent port occupied.
+            server.server_close()
+        finally:
+            manager.shutdown()
 
 
 def main() -> None:

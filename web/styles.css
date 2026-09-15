@@ -90,3 +90,5 @@ button.event-item{border:0;background:transparent;width:100%;text-align:left;fon
 .ghost-button{border:1px solid var(--line);background:#fff;color:var(--ink);padding:10px 16px;border-radius:3px;cursor:pointer;font-weight:700}
 .ghost-button:hover{background:#f7fbf9}
 .stop-actions .danger-button{padding:10px 16px}
+#fps-chart,#resource-chart{height:200px}
+#memory-chart,#fps-detail-chart,#cpu-detail-chart,#mem-detail-chart,#gpu-detail-chart,#net-detail-chart{height:220px}

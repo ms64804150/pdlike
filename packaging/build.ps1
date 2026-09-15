@@ -126,14 +126,56 @@ if (-not (Test-Path $Out)) {
     throw "PyInstaller finished but $Out is missing"
 }
 
-$DoctorText = (& $Out --doctor | Out-String)
-if ($LASTEXITCODE -ne 0) {
-    throw "Packaged PerfPilot --doctor failed with exit $LASTEXITCODE"
+$Internal = Join-Path $Root "dist\PerfPilot\_internal"
+# sslpsk_pmd3's Windows extension looks for the conventional OpenSSL names,
+# while recent uv/Python distributions ship the same DLLs with an -x64 suffix.
+# Keep both names in the portable bundle.
+foreach ($Dll in @("libssl-3", "libcrypto-3")) {
+    $suffixed = Join-Path $Internal ("{0}-x64.dll" -f $Dll)
+    $plain = Join-Path $Internal ("{0}.dll" -f $Dll)
+    if ((Test-Path $suffixed) -and -not (Test-Path $plain)) {
+        Copy-Item -LiteralPath $suffixed -Destination $plain
+        Write-Host ("[Packaging] add OpenSSL compatibility DLL: {0}" -f (Split-Path $plain -Leaf))
+    }
+}
+
+$DoctorStdout = Join-Path $env:TEMP ("perfpilot-doctor-{0}.out" -f [guid]::NewGuid())
+$DoctorStderr = Join-Path $env:TEMP ("perfpilot-doctor-{0}.err" -f [guid]::NewGuid())
+try {
+    $DoctorProcess = Start-Process -FilePath $Out -ArgumentList @("--doctor") -Wait -PassThru -NoNewWindow `
+        -RedirectStandardOutput $DoctorStdout -RedirectStandardError $DoctorStderr
+    $DoctorText = Get-Content -LiteralPath $DoctorStdout -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $DoctorText) {
+        $DoctorText = ""
+    } else {
+        $DoctorText = $DoctorText.Trim()
+    }
+    if ($DoctorProcess.ExitCode -ne 0) {
+        $DoctorError = (Get-Content -LiteralPath $DoctorStderr -Raw -ErrorAction SilentlyContinue).Trim()
+        throw "Packaged PerfPilot --doctor failed with exit $($DoctorProcess.ExitCode): $DoctorError"
+    }
+    # Keep only the JSON object in case a bootloader/runtime message is
+    # written around stdout by a different PowerShell/native-process setup.
+    $jsonStart = $DoctorText.IndexOf("{")
+    $jsonEnd = $DoctorText.LastIndexOf("}")
+    if ($jsonStart -ge 0 -and $jsonEnd -ge $jsonStart) {
+        $DoctorText = $DoctorText.Substring($jsonStart, $jsonEnd - $jsonStart + 1)
+    }
+} finally {
+    Remove-Item -LiteralPath $DoctorStdout,$DoctorStderr -Force -ErrorAction SilentlyContinue
 }
 try {
-    $Doctor = $DoctorText | ConvertFrom-Json
+    $Doctor = ConvertFrom-Json -InputObject $DoctorText
 } catch {
-    throw "Packaged PerfPilot --doctor returned invalid JSON: $DoctorText"
+    # Some Windows PowerShell builds reject otherwise valid UTF-8 JSON when
+    # native stdout contains non-ASCII diagnostic text. The doctor output is
+    # still trusted only when it explicitly reports portableReady=true.
+    if ($DoctorText -match '"portableReady"\s*:\s*true') {
+        $Doctor = [pscustomobject]@{ portableReady = $true }
+        Write-Host "[Packaging] doctor JSON parser fallback: portableReady=true"
+    } else {
+        throw "Packaged PerfPilot --doctor returned invalid JSON: $DoctorText"
+    }
 }
 if (-not $Doctor.portableReady) {
     $Details = ($Doctor.hints | ForEach-Object { "- $_" }) -join [Environment]::NewLine

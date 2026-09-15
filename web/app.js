@@ -399,6 +399,17 @@ function resetMetricDisplay(session) {
   $('chart-fps-label').textContent = '--';
   $('chart-resource-label').textContent = '等待数据';
   if ($('chart-memory-label')) $('chart-memory-label').textContent = '--';
+  ['cpu-detail-label', 'fps-detail-label', 'mem-detail-label', 'gpu-detail-label', 'net-up-detail', 'net-down-detail', 'net-up-total', 'net-down-total'].forEach((id) => {
+    const node = $(id);
+    if (node) node.textContent = '--';
+  });
+  ['fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart'].forEach((id) => {
+    const canvas = $(id);
+    if (!canvas) return;
+    const context = canvas.getContext('2d');
+    if (context) context.clearRect(0, 0, canvas.width, canvas.height);
+    canvas._chartMeta = null;
+  });
   drawCharts([], (session && session.extras) || {}, inspectMarkerTime(session, []));
 }
 
@@ -1486,19 +1497,11 @@ function memAxisMax(values) {
 }
 
 function chartYAxis(kind, lists) {
-  const nums = finiteValues(lists);
-  const peak = nums.length ? Math.max(0, ...nums) : 0;
-  let yMax = 10;
-  if (kind === 'fps') yMax = fpsAxisMax(nums);
-  else if (kind === 'pct') yMax = cpuAxisMax(nums);
-  else if (kind === 'mem') yMax = memAxisMax(nums);
-  else yMax = Math.max(10, niceCeil(peak, 4));
+  // Live charts use a fixed scale. Re-scaling from the current peak makes
+  // the vertical axis jump every time a new sample arrives.
+  const yMax = kind === 'fps' ? 120 : kind === 'pct' ? 100 : kind === 'mem' ? 2048 : 10;
   const step = yMax / 4;
-  const prev = chartYAxis._last || {};
-  if (prev[kind] !== yMax) {
-    console.info('[ChartAxis] fixed kind=%s n=%s peak=%s yMin=0 yMax=%s step=%s', kind, nums.length, peak, yMax, step);
-    chartYAxis._last = { ...prev, [kind]: yMax };
-  }
+  console.info('[ChartAxis] fixed kind=%s yMin=0 yMax=%s step=%s', kind, yMax, step);
   return { yMin: 0, yMax, step };
 }
 
@@ -1561,10 +1564,14 @@ function drawChart(canvas, options) {
   const ySuffix = options.ySuffix || '';
   const context = canvas.getContext('2d');
   const width = canvas.clientWidth || 500;
-  const height = canvas.height;
-  canvas.width = width * devicePixelRatio;
-  canvas.height = height * devicePixelRatio;
-  context.scale(devicePixelRatio, devicePixelRatio);
+  // canvas.height is the backing-store height. Do not use it as the logical
+  // CSS height after resizing, otherwise HiDPI redraws grow it every sample.
+  const height = Number(canvas.dataset.chartHeight) || canvas.clientHeight || Number(canvas.getAttribute('height')) || 200;
+  canvas.dataset.chartHeight = String(height);
+  const pixelRatio = window.devicePixelRatio || 1;
+  canvas.width = Math.round(width * pixelRatio);
+  canvas.height = Math.round(height * pixelRatio);
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   context.clearRect(0, 0, width, height);
   const pad = { l: 54, r: 82, t: 18, b: 22 };
   const plotW = Math.max(40, width - pad.l - pad.r);

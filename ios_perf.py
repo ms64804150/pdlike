@@ -117,18 +117,32 @@ def optional_float(value: Any) -> Optional[float]:
 
 
 def normalize_tidevice_cpu(data: dict[str, Any]) -> Optional[float]:
-    """Convert tidevice's process CPU ratio to total-device CPU percent."""
+    """Convert tidevice CPU values to total-device CPU percent.
+
+    Unit metadata is authoritative.  Older tidevice versions omit it, so the
+    numeric fallback is kept only for those payloads.
+    """
     value = optional_float(data.get("value"))
     cpu_count = optional_float(data.get("count"))
     if value is None:
         return None
+    unit = str(data.get("unit") or data.get("units") or "").strip().lower().replace("-", "_")
+    if unit in {"per_core_percent", "percent_per_core", "percore_percent"}:
+        return max(0.0, value / cpu_count) if cpu_count and cpu_count > 0 else max(0.0, value)
+    if unit in {"ratio", "fraction", "normalized", "per_core_ratio", "ratio_per_core"}:
+        if unit in {"per_core_ratio", "ratio_per_core"} and cpu_count and cpu_count > 0:
+            return max(0.0, value / cpu_count * 100.0)
+        return max(0.0, value * 100.0)
+    if "percent" in unit or unit in {"pct", "%"}:
+        return max(0.0, value)
+
     if cpu_count is None or cpu_count <= 0:
-        return value * 100.0
-    # Normal sysmontap values are ratios whose maximum is approximately CPUCount.
-    if value <= cpu_count * 1.5:
-        return value / cpu_count * 100.0
-    # Some tidevice/device combinations expose a per-core value already in percent.
-    return value / cpu_count
+        return max(0.0, value if value > 1.5 else value * 100.0)
+    # Legacy payloads have no unit. Values above the core-count range are
+    # already percentages (for example 60.5), not values to divide again.
+    if value > cpu_count * 1.5:
+        return max(0.0, value)
+    return max(0.0, value / cpu_count * 100.0)
 
 
 def normalize_pymobiledevice_cpu(data: dict[str, Any]) -> Optional[float]:
@@ -138,8 +152,8 @@ def normalize_pymobiledevice_cpu(data: dict[str, Any]) -> Optional[float]:
     if value is None:
         return None
     if cpu_count is None or cpu_count <= 0:
-        return min(value, 100.0)
-    return value / cpu_count
+        return None
+    return max(0.0, value / cpu_count)
 
 
 def normalize_cpu_event(data: dict[str, Any]) -> Optional[float]:
@@ -533,7 +547,11 @@ class Pymobiledevice3Perf:
         else:
             print(f"[IosPerf] skip apps-query/mounter/cpuCount version={version}", flush=True)
 
-        self.cpu_count = None
+        # CPUCount is needed for converting the process monitor's per-core
+        # percentage into total-device percentage. Query it on every iOS
+        # version, including versions that skip the developer-image step.
+        self.cpu_count = self._read_cpu_count()
+        print(f"[IosPerf] cpuCount={self.cpu_count}", flush=True)
         graphics_command = [
             *self.cli,
             "developer",
@@ -549,17 +567,25 @@ class Pymobiledevice3Perf:
         threading.Thread(target=self._read_graphics, args=(graphics,), daemon=True).start()
         threading.Thread(target=self._read_errors, args=(graphics,), daemon=True).start()
 
-        pid_result = self._run_check(
-            [
-                "developer",
-                "dvt",
-                "process-id-for-bundle-id",
-                self.bundle_id,
-                *self._device_options(),
-            ],
-            timeout=60,
-        )
-        pid_match = re.search(r"(?m)^\s*(\d+)\s*$", pid_result.stdout)
+        # The app PID can change while the graphics service is starting. A
+        # single PID lookup can therefore leave sysmon filtering a process
+        # that is no longer present in its snapshot.
+        pid_arguments = [
+            "developer",
+            "dvt",
+            "process-id-for-bundle-id",
+            self.bundle_id,
+            *self._device_options(),
+        ]
+        pid_result = None
+        pid_match = None
+        for attempt in range(4):
+            if attempt:
+                time.sleep(0.5)
+            pid_result = self._run_check(pid_arguments, timeout=60)
+            pid_match = re.search(r"(?m)^\s*(\d+)\s*$", pid_result.stdout)
+            if pid_result.returncode == 0 and pid_match:
+                break
         if pid_result.returncode != 0 or not pid_match:
             try:
                 graphics.kill()
@@ -609,7 +635,33 @@ class Pymobiledevice3Perf:
             f"[IosPerf] spawn sysmon elapsed={time.monotonic() - started:.1f}s pid={pid}",
             flush=True,
         )
-        sysmon = self._start_process(process_command)
+        sysmon = None
+        sysmon_error = ""
+        for attempt in range(3):
+            sysmon = self._start_process(process_command)
+            time.sleep(0.8)
+            if sysmon.poll() is None:
+                break
+            try:
+                _, stderr = sysmon.communicate(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                stderr = ""
+            sysmon_error = stderr.strip()
+            if "Failed to find a process matching" not in sysmon_error:
+                break
+            # Refresh the PID after a stale-process snapshot failure.
+            pid_result = self._run_check(pid_arguments, timeout=60)
+            pid_match = re.search(r"(?m)^\s*(\d+)\s*$", pid_result.stdout)
+            if pid_result.returncode != 0 or not pid_match:
+                continue
+            process_command[process_command.index("--filter") + 1] = "pid=" + pid_match.group(1)
+            pid = pid_match.group(1)
+        if sysmon is None or sysmon.poll() is not None:
+            try:
+                graphics.kill()
+            except OSError:
+                pass
+            raise RuntimeError(sysmon_error or "iOS sysmon process monitor 启动失败")
         self.processes = [graphics, sysmon]
         threading.Thread(target=self._read_process, args=(sysmon,), daemon=True).start()
         threading.Thread(target=self._read_errors, args=(sysmon,), daemon=True).start()
@@ -673,10 +725,13 @@ class Pymobiledevice3Perf:
             cpu = optional_float(data.get("cpuUsage"))
             memory_bytes = optional_float(data.get("physFootprint"))
             if cpu is not None:
+                # pymobiledevice3's cpuUsage is per-core percent unless the
+                # payload explicitly declares another unit.
+                unit = data.get("cpuUsageUnit") or data.get("unit") or data.get("units") or "per_core_percent"
                 self.events.put(
                     PerfEvent(
                         "cpu",
-                        {"value": cpu, "count": self.cpu_count, "unit": "per_core_percent"},
+                        {"value": cpu, "count": self.cpu_count, "unit": unit},
                     )
                 )
             if memory_bytes is not None:

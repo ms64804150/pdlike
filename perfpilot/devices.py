@@ -170,16 +170,27 @@ def android_devices(timeout: int) -> list[dict[str, Any]]:
     for line in result.stdout.splitlines()[1:]:
         columns = line.split()
         if len(columns) >= 2 and columns[1] == "device":
+            serial = columns[0]
+            version = ""
+            try:
+                version_result = _run(
+                    ["adb", "-s", serial, "shell", "getprop", "ro.build.version.release"],
+                    timeout=5,
+                )
+                if version_result.returncode == 0:
+                    version = version_result.stdout.strip()
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
             found.append(
                 {
-                    "id": columns[0],
+                    "id": serial,
                     "name": next(
                         (x.split(":", 1)[1] for x in columns[2:] if x.startswith("model:")),
-                        columns[0],
+                        serial,
                     ),
                     "model": "Android device",
                     "platform": "android",
-                    "version": "Android",
+                    "version": version,
                     "connection": "USB" if ":" not in columns[0] else "Wi-Fi",
                     "status": "connected",
                 }

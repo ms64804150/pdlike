@@ -722,7 +722,7 @@ class SessionManager:
                         session["collector_logs"] = collector_logs[-80:]
                         if not android:
                             lock = session.get("log_lock")
-                            if isinstance(lock, threading.Lock):
+                            if lock is not None:
                                 with lock:
                                     session.setdefault("logs", []).append(text)
                                     session["logs"] = session["logs"][-UI_LOG_LIMIT:]
