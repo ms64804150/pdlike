@@ -8,10 +8,12 @@ __pycache__/
 .eggs/
 dist/
 build/
+vendor/platform-tools/
 
 # Virtual environments
 .venv/
 .venv-ios/
+.venv-packaging/
 venv/
 ENV/
 
@@ -37,10 +39,16 @@ Thumbs.db
 Desktop.ini
 
 # Local reports / generated outputs
+data/
 web_reports/
 *_report.html
 tidevice_current_experiment.html
 *.log
+debug.log
+
+# Packaged Windows client (build output lives in dist/; do not commit copies under web/)
+web/PerfPilot/
+web/PerfPilot.zip
 
 # Test / temp
 .pytest_cache/

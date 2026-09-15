@@ -41,6 +41,72 @@ class SampleRecord:
     network_up_mb: Optional[float]
 
 
+def _child_environment() -> dict[str, str]:
+    try:
+        from perfpilot.runtime import is_frozen, process_env
+
+        environment = process_env()
+        if not is_frozen():
+            project_root = str(Path(__file__).resolve().parent)
+            python_path = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = (
+                f"{project_root}{os.pathsep}{python_path}" if python_path else project_root
+            )
+        return environment
+    except Exception:
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        environment.pop("PYTHONHOME", None)
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        environment["PYTHONNOUSERSITE"] = "1"
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONUNBUFFERED"] = "1"
+        return environment
+
+
+def _parse_ios_version(raw: str | None) -> tuple[int, ...] | None:
+    if not raw:
+        return None
+    match = re.match(r"^(\d+(?:\.\d+)*)", str(raw).strip())
+    if not match:
+        return None
+    try:
+        return tuple(int(part) for part in match.group(1).split("."))
+    except ValueError:
+        return None
+
+
+def _cli_error_text(result: subprocess.CompletedProcess[str]) -> str:
+    raw = f"{result.stderr or ''}\n{result.stdout or ''}"
+    exceptions: list[str] = []
+    cleaned_lines: list[str] = []
+    for raw_line in raw.splitlines():
+        text = re.sub(r"[│┃┌┐└┘─━╭╮╰╯]+", " ", raw_line)
+        text = re.sub(r"\s+", " ", text).strip(" -")
+        if not text:
+            continue
+        lowered = text.lower()
+        if "sitecustomize" in lowered or "pythonverbose" in lowered:
+            continue
+        if "traceback" in lowered or text.startswith("in ") or "during handling of" in lowered:
+            continue
+        cleaned_lines.append(text)
+        if re.search(r"(Error|Exception|Warning):", text):
+            exceptions.append(text)
+    if exceptions:
+        last = exceptions[-1]
+        if "Failed to load dynlib" in last or "PyInstallerImportError" in last:
+            for item in cleaned_lines:
+                if ".pyd" in item.lower() or ".dll" in item.lower():
+                    last = item
+                    break
+            return f"打包缺少原生库：{last}"
+        if "pyimg4" in last.lower() and "metadata" in last.lower():
+            return "打包缺少 pyimg4 元数据，无法挂载 iOS Developer Image。请使用最新 PerfPilot 安装包。"
+        return last
+    return "\n".join(cleaned_lines[-8:])
+
+
 def optional_float(value: Any) -> Optional[float]:
     if value is None or isinstance(value, bool):
         return None
@@ -143,13 +209,7 @@ class TidevicePerf:
 
     @staticmethod
     def _process_environment() -> dict[str, str]:
-        environment = os.environ.copy()
-        project_root = str(Path(__file__).resolve().parent)
-        python_path = environment.get("PYTHONPATH")
-        environment["PYTHONPATH"] = (
-            f"{project_root}{os.pathsep}{python_path}" if python_path else project_root
-        )
-        return environment
+        return _child_environment()
 
     def start(self) -> None:
         executable = self._find_executable()
@@ -274,22 +334,29 @@ class Pymobiledevice3Perf:
         self.errors: queue.Queue[str] = queue.Queue()
         self.error_lines: list[str] = []
         self.processes: list[subprocess.Popen[str]] = []
-        self.executable = self._find_executable()
+        self.cli = self._find_cli()
         self.tunnel_device: Optional[str] = None
         self.cpu_count: Optional[int] = None
+        self.ios_version: Optional[tuple[int, ...]] = None
 
     @staticmethod
-    def _find_executable() -> str:
+    def _find_cli() -> list[str]:
+        try:
+            from perfpilot.runtime import pymobiledevice3_cmd
+
+            return pymobiledevice3_cmd()
+        except Exception:
+            pass
         names = ("pymobiledevice3.exe", "pymobiledevice3")
         candidates = [Path(sys.executable).with_name(names[0])]
         candidates.append(Path(__file__).parent / ".venv-ios" / "Scripts" / names[0])
         for candidate in candidates:
             if candidate.is_file():
-                return str(candidate)
+                return [str(candidate)]
         for name in names:
             executable = shutil.which(name)
             if executable:
-                return executable
+                return [executable]
         raise RuntimeError(
             "未找到 pymobiledevice3；请使用 64 位 Python 安装：pip install pymobiledevice3"
         )
@@ -299,17 +366,11 @@ class Pymobiledevice3Perf:
 
     @staticmethod
     def _process_environment() -> dict[str, str]:
-        environment = os.environ.copy()
-        project_root = str(Path(__file__).resolve().parent)
-        python_path = environment.get("PYTHONPATH")
-        environment["PYTHONPATH"] = (
-            f"{project_root}{os.pathsep}{python_path}" if python_path else project_root
-        )
-        return environment
+        return _child_environment()
 
     def _device_details(self) -> Optional[tuple[str, tuple[int, ...]]]:
         result = subprocess.run(
-            [self.executable, "usbmux", "list"],
+            [ *self.cli, "usbmux", "list"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -330,18 +391,26 @@ class Pymobiledevice3Perf:
             if self.udid and identifier != self.udid:
                 continue
             version = device.get("ProductVersion")
-            if isinstance(version, str):
-                match = re.match(r"^(\d+(?:\.\d+)*)", version)
-                if match:
-                    return (
-                        str(identifier),
-                        tuple(int(part) for part in match.group(1).split(".")),
-                    )
+            parsed = _parse_ios_version(version if isinstance(version, str) else None)
+            if parsed:
+                return (str(identifier), parsed)
         return None
 
     def _device_version(self) -> Optional[tuple[int, ...]]:
-        details = self._device_details()
-        return details[1] if details else None
+        if self.ios_version is None:
+            details = self._device_details()
+            if details:
+                self.udid = self.udid or details[0]
+                self.ios_version = details[1]
+        return self.ios_version
+
+    def _needs_admin_tunnel(self) -> bool:
+        version = self._device_version()
+        return version is not None and (17, 0) <= version < (17, 4)
+
+    def _needs_userspace(self) -> bool:
+        version = self._device_version()
+        return version is not None and version >= (17, 0)
 
     @staticmethod
     def _tunneld_available() -> bool:
@@ -369,7 +438,9 @@ class Pymobiledevice3Perf:
         if self.rsd_host:
             return
         version = self._device_version()
-        if version is None or version >= (17, 4):
+        print(f"[IosPerf] device version={version} udid={self.udid}", flush=True)
+        if not self._needs_admin_tunnel():
+            print("[IosPerf] skip admin tunneld, not iOS 17.0-17.3", flush=True)
             return
 
         if self._tunneld_has_device():
@@ -377,11 +448,12 @@ class Pymobiledevice3Perf:
             return
 
         if os.name == "nt":
-            executable = str(Path(self.executable).resolve()).replace("'", "''")
+            file_path = str(Path(self.cli[0]).resolve()).replace("'", "''")
+            rest = " ".join([*self.cli[1:], "remote", "tunneld", "--protocol", "tcp"])
             elevated = (
                 "Start-Process -FilePath 'powershell.exe' "
                 "-ArgumentList @('-NoProfile','-NoExit','-Command', "
-                f'"& \'{executable}\' remote tunneld --protocol tcp") '
+                f'"& \'{file_path}\' {rest}") '
                 "-Verb RunAs"
             )
             result = subprocess.run(
@@ -394,7 +466,7 @@ class Pymobiledevice3Perf:
                 env=self._process_environment(),
             )
         else:
-            command = [self.executable, "remote", "tunneld", "--daemonize", "--protocol", "tcp"]
+            command = [*self.cli, "remote", "tunneld", "--daemonize", "--protocol", "tcp"]
             result = subprocess.run(
                 command, capture_output=True, text=True, timeout=30, env=self._process_environment()
             )
@@ -402,7 +474,7 @@ class Pymobiledevice3Perf:
         while not self._tunneld_has_device() and time.monotonic() < deadline:
             time.sleep(0.5)
         if result.returncode != 0 and not self._tunneld_has_device():
-            detail = (result.stderr or result.stdout).strip()
+            detail = _cli_error_text(result)
             raise RuntimeError(
                 "iOS 17.4 以下版本需要管理员权限启动 remote tunneld；"
                 "请接受 UAC 提示后重试。"
@@ -420,13 +492,15 @@ class Pymobiledevice3Perf:
             return ["--rsd", self.rsd_host, str(self.rsd_port)]
         if self.tunnel_device:
             return ["--tunnel", self.tunnel_device]
-        options = ["--userspace"] if userspace else []
+        options = ["--userspace"] if userspace or self._needs_userspace() else []
         options.extend(self._device_args())
         return options
 
     def _run_check(self, arguments: list[str], timeout: int = 60) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [self.executable, *arguments, *self._device_args()],
+        command = [*self.cli, *arguments, *self._device_args()]
+        print(f"[IosPerf] cli start cmd={' '.join(command)} timeout={timeout}", flush=True)
+        result = subprocess.run(
+            command,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -434,25 +508,46 @@ class Pymobiledevice3Perf:
             timeout=timeout,
             env=self._process_environment(),
         )
+        err = _cli_error_text(result)
+        print(
+            f"[IosPerf] cli done cmd={arguments[0] if arguments else ''} rc={result.returncode} err={err[:400]!r}",
+            flush=True,
+        )
+        return result
 
     def start(self) -> None:
+        started = time.monotonic()
+        print(f"[IosPerf] start bundle={self.bundle_id} udid={self.udid} cli={' '.join(self.cli)}", flush=True)
         self._ensure_legacy_tunnel()
-        app_info = self._run_check(["apps", "query", self.bundle_id])
-        if app_info.returncode != 0:
-            raise RuntimeError(app_info.stderr.strip() or "无法读取设备应用列表")
-        try:
-            installed_apps = json.loads(app_info.stdout)
-        except json.JSONDecodeError as error:
-            raise RuntimeError("无法解析 pymobiledevice3 应用查询结果") from error
-        if self.bundle_id not in installed_apps:
-            raise RuntimeError(f"设备上未找到 Bundle ID：{self.bundle_id}")
+        version = self._device_version()
+        if version is not None and version < (17, 0):
+            print("检查 iOS Developer Disk Image...", flush=True)
+            mount = self._run_check(["mounter", "auto-mount"], timeout=180)
+            if mount.returncode != 0:
+                err = _cli_error_text(mount)
+                lowered = err.lower()
+                if "already mounted" in lowered or "alreadymounted" in lowered:
+                    print("[IosPerf] developer image already mounted", flush=True)
+                else:
+                    raise RuntimeError(err or "Developer Disk Image 挂载失败")
+        else:
+            print(f"[IosPerf] skip apps-query/mounter/cpuCount version={version}", flush=True)
 
-        print("检查 iOS Developer Disk Image...")
-        mount = self._run_check(["mounter", "auto-mount"], timeout=180)
-        if mount.returncode != 0:
-            raise RuntimeError(mount.stderr.strip() or "Developer Disk Image 挂载失败")
-
-        self.cpu_count = self._read_cpu_count()
+        self.cpu_count = None
+        graphics_command = [
+            *self.cli,
+            "developer",
+            "dvt",
+            "graphics",
+            *self._device_options(),
+        ]
+        print(
+            f"[IosPerf] spawn graphics elapsed={time.monotonic() - started:.1f}s cmd={' '.join(graphics_command)}",
+            flush=True,
+        )
+        graphics = self._start_process(graphics_command)
+        threading.Thread(target=self._read_graphics, args=(graphics,), daemon=True).start()
+        threading.Thread(target=self._read_errors, args=(graphics,), daemon=True).start()
 
         pid_result = self._run_check(
             [
@@ -460,40 +555,36 @@ class Pymobiledevice3Perf:
                 "dvt",
                 "process-id-for-bundle-id",
                 self.bundle_id,
-                *self._device_options(userspace=True),
+                *self._device_options(),
             ],
             timeout=60,
         )
         pid_match = re.search(r"(?m)^\s*(\d+)\s*$", pid_result.stdout)
         if pid_result.returncode != 0 or not pid_match:
-            detail = pid_result.stderr.strip()
+            try:
+                graphics.kill()
+            except OSError:
+                pass
+            detail = _cli_error_text(pid_result)
             if self.tunnel_device and "Device is not connected" in detail:
                 raise RuntimeError(
                     "本地 remote tunneld 服务已启动，但没有建立设备隧道。"
                     "请关闭当前 tunneld，并在管理员 PowerShell 中重新启动：\n"
-                    f"{self.executable} remote tunneld --protocol tcp\n"
+                    f"{' '.join(self.cli)} remote tunneld --protocol tcp\n"
                     "保持该窗口运行后，再启动本脚本。"
                 )
             if "no-root userspace tunnel unavailable" in detail:
                 raise RuntimeError(
                     "无法建立 iOS 用户态隧道。当前设备为 iOS 17.0，"
                     "不支持 CoreDeviceProxy；请使用管理员 PowerShell 先启动：\n"
-                    f"{self.executable} remote tunneld --daemonize --protocol tcp\n"
+                    f"{' '.join(self.cli)} remote tunneld --daemonize --protocol tcp\n"
                     "启动后重新运行本脚本。也可以让 iPhone 与电脑连接同一 Wi-Fi，"
                     "并确保 Bonjour/RemotePairing 可用。"
                 )
             raise RuntimeError(detail or f"目标 App 未运行：{self.bundle_id}")
         pid = pid_match.group(1)
-
-        graphics_command = [
-            self.executable,
-            "developer",
-            "dvt",
-            "graphics",
-            *self._device_options(userspace=True),
-        ]
         process_command = [
-            self.executable,
+            *self.cli,
             "developer",
             "dvt",
             "sysmon",
@@ -512,13 +603,17 @@ class Pymobiledevice3Perf:
             "physFootprint",
             "--key",
             "pid",
-            *self._device_options(userspace=True),
+            *self._device_options(),
         ]
-        self.processes = [self._start_process(graphics_command), self._start_process(process_command)]
-        threading.Thread(target=self._read_graphics, args=(self.processes[0],), daemon=True).start()
-        threading.Thread(target=self._read_process, args=(self.processes[1],), daemon=True).start()
-        for process in self.processes:
-            threading.Thread(target=self._read_errors, args=(process,), daemon=True).start()
+        print(
+            f"[IosPerf] spawn sysmon elapsed={time.monotonic() - started:.1f}s pid={pid}",
+            flush=True,
+        )
+        sysmon = self._start_process(process_command)
+        self.processes = [graphics, sysmon]
+        threading.Thread(target=self._read_process, args=(sysmon,), daemon=True).start()
+        threading.Thread(target=self._read_errors, args=(sysmon,), daemon=True).start()
+        print(f"[IosPerf] start ready elapsed={time.monotonic() - started:.1f}s pid={pid}", flush=True)
 
     @staticmethod
     def _start_process(command: list[str]) -> subprocess.Popen[str]:
@@ -539,14 +634,14 @@ class Pymobiledevice3Perf:
     def _read_cpu_count(self) -> Optional[int]:
         result = subprocess.run(
             [
-                self.executable,
+                *self.cli,
                 "developer",
                 "dvt",
                 "sysmon",
                 "system",
                 "--fields",
                 "CPUCount",
-                *self._device_options(userspace=True),
+                *self._device_options(),
             ],
             capture_output=True,
             text=True,
@@ -830,9 +925,13 @@ def write_report(path: str, bundle_id: str, udid: Optional[str], records: list[S
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.backend == "tidevice":
+    backend = args.backend
+    if getattr(sys, "frozen", False) and backend == "tidevice":
+        print("[IosPerf] frozen has no tidevice, backend=pymobiledevice3", flush=True)
+        backend = "pymobiledevice3"
+    if backend == "tidevice":
         collector = TidevicePerf(args.bundle, args.udid)
-    elif args.backend == "pymobiledevice3":
+    elif backend == "pymobiledevice3":
         collector = Pymobiledevice3Perf(
             args.bundle, args.udid, args.rsd_host, args.rsd_port
         )
@@ -871,6 +970,11 @@ def run(args: argparse.Namespace) -> int:
             if failure:
                 raise RuntimeError(failure)
             for event in collector.drain_events():
+                if not received_event:
+                    print(
+                        f"[IosPerf] first event kind={event.kind} afterStart={time.monotonic() - started:.1f}s",
+                        flush=True,
+                    )
                 received_event = True
                 if event.kind in ("fps", "cpu", "memory", "gpu"):
                     latest[event.kind] = (
@@ -898,8 +1002,7 @@ def run(args: argparse.Namespace) -> int:
                 raise RuntimeError("检测时长内未收到任何 tidevice 性能数据")
             if now >= next_sample:
                 if not received_event:
-                    sys.stdout.write("\r等待 iOS 性能数据...".ljust(110))
-                    sys.stdout.flush()
+                    print("[IosPerf] waiting first sample", flush=True)
                     next_sample += args.interval
                     continue
                 elapsed = now - started
@@ -913,6 +1016,12 @@ def run(args: argparse.Namespace) -> int:
                     latest["network_up"],
                 )
                 records.append(record)
+                def _fmt(value: Optional[float]) -> str:
+                    return f"{value:.1f}" if value is not None else "none"
+                print(
+                    f"PERFPILOT_SAMPLE\tfps={_fmt(record.fps)}\tcpu={_fmt(record.cpu_pct)}\tmemory={_fmt(record.memory_mb)}\tgpu={_fmt(record.gpu_pct)}",
+                    flush=True,
+                )
                 status = (
                     f"[{args.bundle}] FPS={format_value(record.fps):>5}  "
                     f"AppCPU={format_value(record.cpu_pct, '%'):>7}  "
@@ -934,7 +1043,8 @@ def run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     except (OSError, RuntimeError) as error:
-        print(f"\n采样失败：{error}", file=sys.stderr)
+        message = " ".join(str(error).split())
+        print(f"\n采样失败：{message}", file=sys.stderr, flush=True)
         return 1
     finally:
         try:

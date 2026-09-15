@@ -3,8 +3,8 @@
 
 import argparse
 import html
+import json
 import re
-import shlex
 import statistics
 import subprocess
 import sys
@@ -19,35 +19,93 @@ PROFILE_MARKER = "---PROFILEDATA---"
 MAX_TIMESTAMP = 9_000_000_000_000_000_000
 
 
-def adb_shell(serial: Optional[str], *args: str) -> str:
-    adb_args = ["adb"]
+def _adb_bin() -> str:
+    try:
+        from perfpilot.runtime import adb_executable
+
+        return adb_executable()
+    except Exception:
+        return "adb"
+
+
+def _align_next_tick(next_tick: float, interval: float) -> float:
+    deadline = next_tick + interval
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        time.sleep(remaining)
+        return deadline
+    return time.monotonic()
+
+
+def _quote_remote(arg: str) -> str:
+    if re.fullmatch(r"[\w./:@%+=,:-]+", arg):
+        return arg
+    escaped = arg.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    return f'"{escaped}"'
+
+
+def _is_winerror8(error: BaseException) -> bool:
+    return isinstance(error, OSError) and getattr(error, "winerror", None) == 8
+
+
+def _spawn_fail_message(error: BaseException) -> str:
+    if _is_winerror8(error):
+        return "本机短时间内启动了过多 adb 进程（WinError 8），请重新开始监测"
+    return " ".join(str(error).split())
+
+
+def adb_shell(serial: Optional[str], *args: str, check: bool = True) -> str:
+    adb_args = [_adb_bin()]
     if serial:
         adb_args.extend(["-s", serial])
-    remote_command = " ".join(shlex.quote(arg) for arg in args)
+    kw: dict = {}
+    try:
+        from perfpilot.runtime import adb_cwd, adb_env, subprocess_kwargs
+
+        kw["cwd"] = adb_cwd() or None
+        kw["env"] = adb_env()
+        kw.update(subprocess_kwargs())
+    except Exception:
+        pass
+    remote_command = " ".join(_quote_remote(arg) for arg in args)
     result = subprocess.run(
         [*adb_args, "shell", remote_command],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=10,
+        timeout=20,
+        **kw,
     )
     if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(message or f"adb shell 退出码 {result.returncode}")
+        message = (result.stderr or result.stdout or "").strip()
+        print(
+            f"[AndroidSample] adb shell fail serial={serial} cmd={' '.join(args)} rc={result.returncode} check={check} err={message[:300]!r}",
+            flush=True,
+        )
+        if check:
+            raise RuntimeError(message or f"adb shell 退出码 {result.returncode}")
+        return f"{result.stdout or ''}\n{result.stderr or ''}"
     return result.stdout
 
 
 def foreground_package(serial: Optional[str]) -> Optional[str]:
-    output = adb_shell(serial, "dumpsys", "window")
-    for pattern in (
-        r"mCurrentFocus=.*?\s([\w.]+)/[\w.$]+",
-        r"mFocusedApp=.*?\s([\w.]+)/[\w.$]+",
-    ):
-        match = re.search(pattern, output)
-        if match:
-            return match.group(1)
-    return None
+    try:
+        from perfpilot.android_fg import foreground_package as detect_foreground
+
+        return detect_foreground(serial)
+    except Exception:
+        output = adb_shell(serial, "dumpsys", "window")
+        for pattern in (
+            r"mCurrentFocus=Window\{[^\s]+\s+[^\s]+\s+([\w.]+)/",
+            r"mCurrentFocus=.*?\s([\w.]+)/[\w.$]+",
+            r"mFocusedApp=.*?\s([\w.]+)/[\w.$]+",
+            r"mResumedActivity:.*? ([\w.]+)/",
+        ):
+            match = re.search(pattern, output)
+            if match:
+                return match.group(1)
+        return None
 
 
 def parse_gfx_timestamps(output: str) -> list[int]:
@@ -102,18 +160,28 @@ def parse_surface_timestamps(output: str) -> tuple[list[int], Optional[int]]:
     return sorted(ready_timestamps or present_timestamps), refresh_ns
 
 
+def layer_belongs_to_package(layer: str, package: str) -> bool:
+    if not layer or not package:
+        return False
+    return (
+        f"{package}/" in layer
+        or layer.startswith(package)
+        or f"[{package}]" in layer
+    )
+
+
 def parse_layers(output: str, package: str) -> list[str]:
     layers: list[str] = []
     for raw_line in output.splitlines():
         line = raw_line.strip()
-        if package not in line:
+        if not layer_belongs_to_package(line, package):
             continue
         if line.startswith("RequestedLayerState{"):
             line = line[len("RequestedLayerState{"):]
             line = re.split(r"\s+parentId=", line, maxsplit=1)[0]
         elif line.startswith("Layer{"):
             line = line[len("Layer{"):].rsplit("}", 1)[0]
-        if line and line not in layers:
+        if line and line not in layers and layer_belongs_to_package(line, package):
             layers.append(line)
     return sorted(
         layers,
@@ -133,10 +201,19 @@ class FrameSnapshot:
 
 
 @dataclass
+class MemInfo:
+    pss_mb: Optional[float] = None
+    native_pss_mb: Optional[float] = None
+    swap_pss_mb: Optional[float] = None
+
+
+@dataclass
 class ProcessMetrics:
     cpu_pct: Optional[float]
     pss_mb: Optional[float]
     pid: Optional[int]
+    native_pss_mb: Optional[float] = None
+    swap_pss_mb: Optional[float] = None
 
 
 @dataclass
@@ -276,6 +353,103 @@ class LiveCharts:
         self.labels.configure(text=f"FPS {latest.fps:.1f}   平均 {latest.average_fps:.1f}   CPU {cpu_text}   PSS {pss_text}")
 
 
+def _kb_to_mb(value: Optional[int]) -> Optional[float]:
+    if value is None:
+        return None
+    return value / 1024.0
+
+
+def parse_android_meminfo(output: str) -> MemInfo:
+    """Parse TOTAL PSS / Native Heap PSS / Swap PSS from dumpsys meminfo (KB → MB)."""
+    native_kb: Optional[int] = None
+    total_kb: Optional[int] = None
+    swap_kb: Optional[int] = None
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        swap_hit = re.search(r"TOTAL SWAP PSS:\s*(\d+)", line, re.I)
+        if swap_hit:
+            swap_kb = int(swap_hit.group(1))
+        if re.match(r"^Native Heap\b", line, re.I):
+            nums = re.findall(r"\d+", line)
+            if nums:
+                native_kb = int(nums[0])
+            continue
+        if re.match(r"^TOTAL\b", line, re.I):
+            prefix = re.split(r"TOTAL SWAP PSS", line, maxsplit=1, flags=re.I)[0]
+            nums = re.findall(r"\d+", prefix)
+            if nums:
+                total_kb = int(nums[0])
+            if swap_kb is None and len(nums) >= 4:
+                swap_kb = int(nums[3])
+    return MemInfo(_kb_to_mb(total_kb), _kb_to_mb(native_kb), _kb_to_mb(swap_kb))
+
+
+_EXTRAS_MISS_LOGGED = False
+_EXTRAS_OK_LOGGED = False
+
+
+def _fmt_metric(value: Optional[float]) -> str:
+    return f"{value:.1f}" if value is not None else "none"
+
+
+def _log_meminfo_extras(package: str, metrics: ProcessMetrics, emit_native: bool, emit_swap: bool) -> None:
+    global _EXTRAS_MISS_LOGGED, _EXTRAS_OK_LOGGED
+    if not emit_native and not emit_swap:
+        return
+    incomplete = (emit_native and metrics.native_pss_mb is None) or (emit_swap and metrics.swap_pss_mb is None)
+    if incomplete and not _EXTRAS_MISS_LOGGED:
+        _EXTRAS_MISS_LOGGED = True
+        print(
+            f"[AndroidSample] extras parse incomplete package={package} native={metrics.native_pss_mb} swap={metrics.swap_pss_mb}",
+            flush=True,
+        )
+    elif not incomplete and not _EXTRAS_OK_LOGGED:
+        _EXTRAS_OK_LOGGED = True
+        print(
+            f"[AndroidSample] extras sample package={package} native={_fmt_metric(metrics.native_pss_mb)} swap={_fmt_metric(metrics.swap_pss_mb)}",
+            flush=True,
+        )
+
+
+def format_sample_line(
+    fps: Optional[float],
+    cpu: Optional[float],
+    memory: Optional[float],
+    native: Optional[float] = None,
+    swap: Optional[float] = None,
+    emit_native: bool = False,
+    emit_swap: bool = False,
+) -> str:
+    parts = [
+        "PERFPILOT_SAMPLE",
+        f"fps={_fmt_metric(fps)}",
+        f"cpu={_fmt_metric(cpu)}",
+        f"memory={_fmt_metric(memory)}",
+    ]
+    if emit_native:
+        parts.append(f"nativePss={_fmt_metric(native)}")
+    if emit_swap:
+        parts.append(f"swapPss={_fmt_metric(swap)}")
+    return "\t".join(parts)
+
+
+def read_extras_file(path: Optional[str]) -> dict[str, bool]:
+    if not path:
+        return {}
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        "nativePss": bool(data.get("nativePss")),
+        "swapPss": bool(data.get("swapPss")),
+    }
+
+
 class ProcessMonitor:
     def __init__(self, serial: Optional[str]) -> None:
         self.serial = serial
@@ -284,20 +458,29 @@ class ProcessMonitor:
         self.last_system_ticks: Optional[int] = None
 
     def sample(self, package: str) -> ProcessMetrics:
-        pid = self._find_pid(package)
-        if pid != self.pid:
+        mem = self._read_meminfo(package)
+        process_ticks: Optional[int] = None
+        if self.pid is not None:
+            process_ticks = self._read_process_ticks(self.pid)
+            if process_ticks is None:
+                self.pid = None
+                self.last_process_ticks = None
+                self.last_system_ticks = None
+        if self.pid is None:
+            pid = self._find_pid(package)
             self.pid = pid
             self.last_process_ticks = None
             self.last_system_ticks = None
-        if pid is None:
-            return ProcessMetrics(None, self._read_pss(package), None)
+            if pid is None:
+                return ProcessMetrics(None, mem.pss_mb, None, mem.native_pss_mb, mem.swap_pss_mb)
+            process_ticks = self._read_process_ticks(pid)
+        if process_ticks is None:
+            return ProcessMetrics(None, mem.pss_mb, self.pid, mem.native_pss_mb, mem.swap_pss_mb)
 
-        process_ticks = self._read_process_ticks(pid)
         system_ticks = self._read_system_ticks()
         cpu_pct: Optional[float] = None
         if (
-            process_ticks is not None
-            and system_ticks is not None
+            system_ticks is not None
             and self.last_process_ticks is not None
             and self.last_system_ticks is not None
         ):
@@ -307,17 +490,34 @@ class ProcessMonitor:
                 cpu_pct = process_delta / system_delta * 100.0
         self.last_process_ticks = process_ticks
         self.last_system_ticks = system_ticks
-        return ProcessMetrics(cpu_pct, self._read_pss(package), pid)
+        return ProcessMetrics(cpu_pct, mem.pss_mb, self.pid, mem.native_pss_mb, mem.swap_pss_mb)
 
     def _find_pid(self, package: str) -> Optional[int]:
-        output = adb_shell(self.serial, "pidof", package).strip()
         try:
-            return int(output.split()[0]) if output else None
-        except ValueError:
+            output = adb_shell(self.serial, "pidof", package, check=False).strip()
+        except RuntimeError:
             return None
+        pids: list[int] = []
+        for token in output.split():
+            try:
+                pids.append(int(token))
+            except ValueError:
+                continue
+        for pid in pids:
+            try:
+                cmdline = adb_shell(self.serial, "cat", f"/proc/{pid}/cmdline").replace("\0", " ").strip()
+            except RuntimeError:
+                continue
+            first = cmdline.split()[0] if cmdline else ""
+            if first == package or first.startswith(f"{package}:"):
+                return pid
+        return pids[0] if pids else None
 
     def _read_process_ticks(self, pid: int) -> Optional[int]:
-        output = adb_shell(self.serial, "cat", f"/proc/{pid}/stat").strip()
+        try:
+            output = adb_shell(self.serial, "cat", f"/proc/{pid}/stat").strip()
+        except RuntimeError:
+            return None
         closing_parenthesis = output.rfind(")")
         if closing_parenthesis < 0:
             return None
@@ -342,16 +542,15 @@ class ProcessMonitor:
         except ValueError:
             return None
 
-    def _read_pss(self, package: str) -> Optional[float]:
+    def _read_meminfo(self, package: str) -> MemInfo:
         output = adb_shell(self.serial, "dumpsys", "meminfo", package)
-        for line in output.splitlines():
-            if not line.strip().startswith("TOTAL"):
-                continue
-            values = re.findall(r"\d+", line)
-            if values:
-                # dumpsys meminfo reports TOTAL PSS in KB.
-                return int(values[0]) / 1024.0
-        return None
+        parsed = parse_android_meminfo(output)
+        if parsed.pss_mb is None:
+            print(
+                f"[AndroidSample] meminfo parse miss package={package} bytes={len(output)}",
+                flush=True,
+            )
+        return parsed
 
 
 class AdbFrameSource:
@@ -361,6 +560,8 @@ class AdbFrameSource:
         self.surface_layer: Optional[str] = None
 
     def sample(self, package: str) -> FrameSnapshot:
+        if self.surface_layer and not layer_belongs_to_package(self.surface_layer, package):
+            self.surface_layer = None
         if self.mode in ("auto", "surface"):
             snapshot = self._sample_surface(package)
             if snapshot:
@@ -369,7 +570,17 @@ class AdbFrameSource:
                 return FrameSnapshot("surface", [], None)
 
         if self.mode in ("auto", "gfxinfo"):
-            output = adb_shell(self.serial, "dumpsys", "gfxinfo", package, "framestats")
+            try:
+                output = adb_shell(self.serial, "dumpsys", "gfxinfo", package, "framestats")
+            except RuntimeError as error:
+                print(
+                    f"[AndroidSample] gfxinfo fail package={package} err={error}",
+                    flush=True,
+                )
+                return FrameSnapshot("gfxinfo", [], None)
+            owner = re.search(r"Graphics info for pid \d+ \[([^\]]+)\]", output)
+            if owner and owner.group(1) != package:
+                return FrameSnapshot("gfxinfo-mismatch", [], None)
             timestamps = parse_gfx_timestamps(output)
             return FrameSnapshot("gfxinfo", timestamps, None)
 
@@ -377,25 +588,50 @@ class AdbFrameSource:
 
     def _sample_surface(self, package: str) -> Optional[FrameSnapshot]:
         if self.surface_layer:
-            latency = adb_shell(
-                self.serial,
-                "dumpsys",
-                "SurfaceFlinger",
-                "--latency",
-                self.surface_layer,
-            )
-            timestamps, refresh_ns = parse_surface_timestamps(latency)
-            if timestamps:
-                return FrameSnapshot(
-                    f"surface:{self.surface_layer}", timestamps, refresh_ns
+            try:
+                latency = adb_shell(
+                    self.serial,
+                    "dumpsys",
+                    "SurfaceFlinger",
+                    "--latency",
+                    self.surface_layer,
                 )
-            self.surface_layer = None
+            except RuntimeError as error:
+                print(
+                    f"[AndroidSample] surface latency fail layer={self.surface_layer!r} err={error}",
+                    flush=True,
+                )
+                self.surface_layer = None
+            else:
+                timestamps, refresh_ns = parse_surface_timestamps(latency)
+                if timestamps:
+                    return FrameSnapshot(
+                        f"surface:{self.surface_layer}", timestamps, refresh_ns
+                    )
+                self.surface_layer = None
 
-        output = adb_shell(self.serial, "dumpsys", "SurfaceFlinger", "--list")
-        for layer in parse_layers(output, package):
-            latency = adb_shell(
-                self.serial, "dumpsys", "SurfaceFlinger", "--latency", layer
+        try:
+            output = adb_shell(self.serial, "dumpsys", "SurfaceFlinger", "--list")
+        except RuntimeError as error:
+            print(f"[AndroidSample] surface list fail package={package} err={error}", flush=True)
+            return None
+        layers = parse_layers(output, package)
+        if not layers:
+            print(
+                f"[AndroidSample] surface list empty package={package} chars={len(output)} preview={output[:240]!r}",
+                flush=True,
             )
+        for layer in layers:
+            try:
+                latency = adb_shell(
+                    self.serial, "dumpsys", "SurfaceFlinger", "--latency", layer
+                )
+            except RuntimeError as error:
+                print(
+                    f"[AndroidSample] surface latency fail layer={layer!r} err={error}",
+                    flush=True,
+                )
+                continue
             timestamps, refresh_ns = parse_surface_timestamps(latency)
             if timestamps:
                 self.surface_layer = layer
@@ -422,6 +658,7 @@ def count_jank(timestamps: list[int], refresh_ns: Optional[int]) -> int:
 
 
 def run(args: argparse.Namespace) -> int:
+    global _EXTRAS_MISS_LOGGED, _EXTRAS_OK_LOGGED
     package = args.package or foreground_package(args.serial)
     if not package:
         print("无法识别前台应用，请通过 --package 指定包名。", file=sys.stderr)
@@ -432,6 +669,7 @@ def run(args: argparse.Namespace) -> int:
     last_timestamp: Optional[int] = None
     last_source: Optional[str] = None
     last_sample_time = time.monotonic()
+    next_tick = last_sample_time
     total_frames = 0
     total_seconds = 0.0
     fps_samples = 0
@@ -446,6 +684,8 @@ def run(args: argparse.Namespace) -> int:
     pss_peak = 0.0
     records: list[SampleRecord] = []
     charts: Optional[LiveCharts] = None
+    background = False
+    extras_sig: Optional[tuple[bool, bool]] = None
     if args.visualize:
         try:
             charts = LiveCharts(package)
@@ -453,24 +693,89 @@ def run(args: argparse.Namespace) -> int:
             print(f"无法启动实时图表：{error}", file=sys.stderr)
             return 1
 
-    print(f"监控 {package}，按 Ctrl+C 停止；结束后报告：{args.report}")
+    print(
+        f"[AndroidSample] start package={package} serial={args.serial or ''} adb={_adb_bin()} mode=oneshot extrasFile={args.extras_file or ''}",
+        flush=True,
+    )
+    exit_code = 0
     try:
         while True:
+            extras = {
+                "nativePss": bool(getattr(args, "native_pss", False)),
+                "swapPss": bool(getattr(args, "swap_pss", False)),
+            }
+            extras.update(read_extras_file(getattr(args, "extras_file", None)))
+            emit_native = bool(extras.get("nativePss"))
+            emit_swap = bool(extras.get("swapPss"))
+            sig = (emit_native, emit_swap)
+            if sig != extras_sig:
+                extras_sig = sig
+                _EXTRAS_MISS_LOGGED = False
+                _EXTRAS_OK_LOGGED = False
+                print(
+                    f"[AndroidSample] extras nativePss={int(emit_native)} swapPss={int(emit_swap)} package={package}",
+                    flush=True,
+                )
             if args.stop_file and Path(args.stop_file).is_file():
                 break
             if charts and charts.closed:
                 break
-            snapshot = source.sample(package)
-            process_metrics = process_monitor.sample(package)
             now = time.monotonic()
             elapsed = now - last_sample_time
+            current = foreground_package(args.serial)
+            offscreen = bool(current and current != package)
+            if offscreen and not background:
+                print("\nPERFPILOT_EVENT\tbackground\t应用不在前台", flush=True)
+                print(f"[AndroidSample] background package={package} current={current}", flush=True)
+                background = True
+                source.surface_layer = None
+            elif background and current == package:
+                print("\nPERFPILOT_EVENT\tforeground\t应用已回到前台", flush=True)
+                print(f"[AndroidSample] foreground resume package={package}", flush=True)
+                background = False
+                source.surface_layer = None
+                last_source = None
+                last_timestamp = None
+                process_monitor.pid = None
+                process_monitor.last_process_ticks = None
+                process_monitor.last_system_ticks = None
+            elif background and current is None:
+                print(f"[AndroidSample] foreground unknown while paused package={package}", flush=True)
 
-            if snapshot.source != last_source:
+            if background or offscreen:
+                process_metrics = process_monitor.sample(package)
+                print(
+                    format_sample_line(
+                        None,
+                        process_metrics.cpu_pct,
+                        process_metrics.pss_mb,
+                        process_metrics.native_pss_mb,
+                        process_metrics.swap_pss_mb,
+                        emit_native,
+                        emit_swap,
+                    ),
+                    flush=True,
+                )
+                _log_meminfo_extras(package, process_metrics, emit_native, emit_swap)
+                last_sample_time = now
+                next_tick = _align_next_tick(next_tick, args.interval)
+                continue
+
+            try:
+                snapshot = source.sample(package)
+            except RuntimeError as error:
+                print(f"[AndroidSample] frame sample fail package={package} err={error}", flush=True)
+                snapshot = FrameSnapshot("error", [], None)
+            process_metrics = process_monitor.sample(package)
+            if snapshot.source == "gfxinfo-mismatch":
+                offscreen = True
+
+            if snapshot.source != last_source and snapshot.source != "gfxinfo-mismatch":
                 last_timestamp = snapshot.timestamps[-1] if snapshot.timestamps else None
                 last_source = snapshot.source
                 last_sample_time = now
                 print(f"数据源: {snapshot.source}")
-                time.sleep(args.interval)
+                next_tick = _align_next_tick(next_tick, args.interval)
                 continue
 
             new_timestamps = [
@@ -492,6 +797,8 @@ def run(args: argparse.Namespace) -> int:
             frames = max(len(new_timestamps) - 1, 0)
             measurement_seconds = frame_span_seconds if frame_span_seconds > 0 else args.interval
             fps = frames / measurement_seconds if measurement_seconds > 0 else 0.0
+            if offscreen:
+                fps = 0.0
             total_frames += frames
             total_seconds += measurement_seconds
             average_fps = total_frames / total_seconds if total_seconds > 0 else 0.0
@@ -537,21 +844,38 @@ def run(args: argparse.Namespace) -> int:
             )
             if charts:
                 charts.update(records)
+            print(
+                format_sample_line(
+                    None if offscreen else fps,
+                    process_metrics.cpu_pct,
+                    process_metrics.pss_mb,
+                    process_metrics.native_pss_mb,
+                    process_metrics.swap_pss_mb,
+                    emit_native,
+                    emit_swap,
+                ),
+                flush=True,
+            )
+            _log_meminfo_extras(package, process_metrics, emit_native, emit_swap)
             status = (
                 f"[{package}][{source_name}] FPS={fps:5.1f}  AVG={average_fps:5.1f}  "
                 f"Frames={total_frames:6d}  Jank={jank:3d}  "
                 f"AppCPU={cpu_text}  AppPSS={pss_text}  "
                 f"FPS>=18={fps_ge18_pct:5.1f}%  FPS>=25={fps_ge25_pct:5.1f}%"
             )
-            sys.stdout.write("\r" + status.ljust(100))
-            sys.stdout.flush()
+            # Keep the live status on stderr. A \r rewrite on stdout would glue
+            # the next PERFPILOT_SAMPLE onto the same line and drop native/swap.
+            sys.stderr.write("\r" + status.ljust(100))
+            sys.stderr.flush()
             last_sample_time = now
-            time.sleep(args.interval)
+            next_tick = _align_next_tick(next_tick, args.interval)
     except KeyboardInterrupt:
         pass
-    except (FileNotFoundError, subprocess.TimeoutExpired, RuntimeError) as error:
-        print(f"\n采样失败：{error}", file=sys.stderr)
-        return 1
+    except (FileNotFoundError, subprocess.TimeoutExpired, RuntimeError, OSError, TimeoutError) as error:
+        message = _spawn_fail_message(error)
+        print(f"\n采样失败：{message}", flush=True)
+        print(f"[AndroidSample] sample abort package={package} err={error}", flush=True)
+        exit_code = 1
     finally:
         if charts and not charts.closed:
             charts.close()
@@ -570,14 +894,15 @@ def run(args: argparse.Namespace) -> int:
             fps_ge18_samples,
             fps_ge25_samples,
         )
-        print(
-            f"\n已停止：平均 FPS={total_frames / total_seconds if total_seconds else 0.0:.1f}，"
-            f"累计帧数={total_frames}，统计时长={total_seconds:.1f}s，"
-            f"Avg(AppCPU)={cpu_sum / cpu_samples if cpu_samples else 0.0:.1f}%、"
-            f"Peak(Memory)={pss_peak:.1f}MB、Peak(AppCPU)={cpu_peak:.1f}%"
-        )
-        print(f"报告已生成：{args.report}")
-    return 0
+        if exit_code == 0:
+            print(
+                f"\n已停止：平均 FPS={total_frames / total_seconds if total_seconds else 0.0:.1f}，"
+                f"累计帧数={total_frames}，统计时长={total_seconds:.1f}s，"
+                f"Avg(AppCPU)={cpu_sum / cpu_samples if cpu_samples else 0.0:.1f}%、"
+                f"Peak(Memory)={pss_peak:.1f}MB、Peak(AppCPU)={cpu_peak:.1f}%"
+            )
+            print(f"报告已生成：{args.report}")
+    return exit_code
 
 
 def main() -> int:
@@ -602,6 +927,9 @@ def main() -> int:
         help="停止时生成的 HTML 报告路径，默认 adb_fps_report.html",
     )
     parser.add_argument("--stop-file", help="Web Agent 创建该文件后正常结束并生成报告")
+    parser.add_argument("--native-pss", action="store_true", help="在样本中输出 Native Heap PSS")
+    parser.add_argument("--swap-pss", action="store_true", help="在样本中输出 Swap PSS")
+    parser.add_argument("--extras-file", help="Web Agent 写入 extras.json 后动态开关 Native/Swap PSS")
     args = parser.parse_args()
     if args.interval <= 0:
         parser.error("--interval 必须大于 0")

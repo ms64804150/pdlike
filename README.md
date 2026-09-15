@@ -1,6 +1,16 @@
-# Android / iOS 性能采集器
+# PerfPilot
 
-当前项目是纯 PC 端性能采集工具：Android 使用 ADB，已验证的 iOS 27.0 使用 `pymobiledevice3`。不构建或运行 Android 采集 APK，也不使用设备端 TCP `receiver.py`。
+本机性能监测 Agent：浏览器操作本机 HTTP 服务，由 Agent 调 Android ADB / iOS `pymobiledevice3` 采集，数据只写在这台电脑上。不构建 Android 采集 APK，也不使用设备端 TCP `receiver.py`。
+
+日常入口：
+
+```powershell
+python .\launcher.py
+```
+
+打开 `http://127.0.0.1:8765`（不要用 `https`，也不要用 `localhost`）。Windows 数据目录默认 `%LOCALAPPDATA%\PerfPilot\`。
+
+根目录的 `adb_fps.py` / `ios_perf.py` 仍可单独当 CLI 采集器；Web 控制台通过子进程复用它们，不要把采集逻辑再拆一份。
 
 支持范围：
 
@@ -77,10 +87,14 @@ adb devices
 Web 控制台由本机 Agent 提供服务，浏览器操作会复用现有 Android / iOS 采集器，不需要额外安装前端依赖：
 
 ```powershell
+python .\launcher.py
+# 或只启动 Agent、自行打开浏览器：
 python .\web_server.py
+# 等价：
+python -m perfpilot
 ```
 
-然后打开 `http://127.0.0.1:8765`。控制台支持设备发现、iOS 应用列表、能力预检、Session 启停、实时 FPS / CPU / Memory / GPU 状态和 HTML 报告入口。指标不可用时会显示“降级”或“不支持”，不会伪造为 0。关闭服务使用 `Ctrl+C`。
+然后打开 `http://127.0.0.1:8765`。控制台支持设备发现、应用列表、能力预检、Run 启停、实时 FPS / CPU / Memory / GPU 和 HTML 报告。每次测试会在本地写入 `run.json`、`samples.jsonl` 和 `report.html`（Windows 默认 `%LOCALAPPDATA%\PerfPilot\runs`）。指标不可用时会显示“降级”或“不支持”，不会伪造为 0。关闭服务使用 `Ctrl+C`。
 
 ### 统一入口（推荐）
 
@@ -327,12 +341,72 @@ adb shell dumpsys meminfo <package>
 
 ## 项目结构
 
+当前产品是 **PerfPilot 本机 Agent（Phase 1）**。浏览器不直接访问 ADB；页面只打本机 HTTP/SSE。
+
 ```text
-perfdog-inject/
-├── perf_monitor.py  # 自动识别设备并选择性能采集器
-├── adb_fps.py       # Android ADB 性能采集入口
-├── ios_perf.py      # iOS 性能采集入口
-└── README.md        # 使用、指标和架构说明
+pdlike/
+├── launcher.py              # 推荐入口：启动 Agent 并打开浏览器
+├── web_server.py            # 兼容入口：只起 HTTP，不自动开浏览器
+├── sitecustomize.py         # 源码运行时加载 Windows / iOS 兼容补丁
+│
+├── perfpilot/               # Agent：HTTP、设备、Run、报告、logcat
+│   ├── __main__.py          # python -m perfpilot；打包 exe 也走这里
+│   ├── server.py            # 127.0.0.1 HTTP + SSE + 静态 web/
+│   ├── session.py           # Run 启停、采集子进程、可选 logcat
+│   ├── devices.py           # 设备扫描、应用列表、能力预检
+│   ├── watch.py             # 设备热插拔
+│   ├── collectors.py        # 组装并解析 adb_fps.py / ios_perf.py 输出
+│   ├── android_fg.py        # Android 前台包名
+│   ├── ios_lockdown.py      # iOS lockdown 设备/应用
+│   ├── logcat.py            # Android 按包名过滤 logcat（默认关闭）
+│   ├── store.py             # run.json / samples.jsonl
+│   ├── report.py            # 结束后生成 HTML 报告
+│   ├── summary.py           # 会话汇总指标
+│   ├── events.py            # 样本 / 状态事件
+│   ├── runtime.py           # PATH、adb、frozen 资源路径
+│   ├── paths.py             # web 根目录、本机数据目录
+│   ├── diagnose.py          # --doctor 便携包自检
+│   ├── win_compat.py        # Windows / pymobiledevice3 补丁
+│   └── logutil.py           # 写 %LOCALAPPDATA%\PerfPilot\logs\agent.log
+│
+├── adb_fps.py               # Android 采集器（CLI 与 Agent 子进程共用）
+├── ios_perf.py              # iOS 采集器（同上）
+├── perf_monitor.py          # CLI 统一入口：按已连接设备转发到上面两个脚本
+│
+├── web/                     # 本地控制台静态页（Agent 直接托管）
+│   ├── index.html
+│   ├── app.js
+│   └── styles.css
+│
+├── packaging/               # Windows 便携包：PyInstaller
+│   ├── build.ps1            # 产出 dist\PerfPilot\ 与 zip
+│   ├── perfpilot.spec
+│   └── requirements-build.txt
+│
+├── vendor/                  # 运行/打包依赖（不要改业务逻辑时动这里）
+│   ├── platform-tools/      # adb（gitignore，构建脚本可下载）
+│   └── wintun/              # iOS 17+ 隧道用 DLL
+│
+├── Web前端UI设计.md         # UI / 交互设计（产品文档，不是运行代码）
+├── PerfPilot最终架构设计.md # 含中心后台的目标架构（尚未实现）
+└── ADB语句说明.md           # ADB 采集命令说明
 ```
 
-Android APK、Gradle 工程、TCP 接收器和旧设计资料已从当前实现中移除。`test.py` 和 `device_choose.py` 属于其他自动化/WDA 连接流程，不是本文档中两个性能采集器的启动入口。
+运行时数据（不进仓库）：
+
+```text
+%LOCALAPPDATA%\PerfPilot\
+├── runs\<runId>\run.json
+├── runs\<runId>\samples.jsonl
+├── runs\<runId>\report.html
+└── logs\agent.log
+```
+
+打包产物应在 `dist\PerfPilot\`，不要提交。`web\PerfPilot\` 和 `web\PerfPilot.zip` 是误放在前端目录下的构建拷贝，已加入 `.gitignore`。
+
+根目录里与 PerfPilot **无关**、不要当启动入口：
+
+- `test.py`、`device_choose.py`：旧 Airtest / WDA 自动化，依赖已不在本仓库的 `config` / `utils`
+- `ios_rsd_tunnel.py`：iOS 17 管理员隧道实验脚本，不是 Web 控制台路径
+
+改 Python 后必须重启 Agent 才生效；只改 `web/` 刷新浏览器即可（注意 `index.html` 里 `app.js` 的 cache bust）。

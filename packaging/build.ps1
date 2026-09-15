@@ -1,0 +1,162 @@
+# Build a portable Windows client: dist\PerfPilot\PerfPilot.exe
+# Usage: powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+
+$ErrorActionPreference = "Stop"
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $Root
+
+function Get-BuildPython {
+    $candidates = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:APPDATA\uv\python\cpython-3.12.14-windows-x86_64-none\python.exe",
+        "$env:USERPROFILE\.local\share\uv\python\cpython-3.12.14-windows-x86_64-none\python.exe"
+    )
+    foreach ($p in $candidates) {
+        if ($p -and (Test-Path $p)) { return $p }
+    }
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        $listed = & py -0p 2>$null
+        foreach ($line in $listed) {
+            if ($line -match "32") { continue }
+            if ($line -match "([A-Za-z]:\\.+python\.exe)") {
+                $hit = $Matches[1].Trim()
+                if (Test-Path $hit) { return $hit }
+            }
+        }
+    }
+    throw "Need 64-bit Python. PATH currently resolves to 32-bit python, which cannot build pymobiledevice3/PyInstaller wheels."
+}
+
+function Assert-64BitPython([string]$PythonExe) {
+    $bits = & $PythonExe -c "import struct; print(struct.calcsize('P') * 8)"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to probe $PythonExe" }
+    if ($bits.Trim() -ne "64") {
+        throw "Refusing $PythonExe ($bits-bit). Use 64-bit Python for this build."
+    }
+}
+
+function Invoke-Python {
+    param([string]$PythonExe, [string[]]$PyArgs)
+    Write-Host ("+ {0} {1}" -f $PythonExe, ($PyArgs -join " "))
+    & $PythonExe @PyArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit $LASTEXITCODE"
+    }
+}
+
+function Stop-LockedDist {
+    $dist = Join-Path $Root "dist\PerfPilot"
+    Write-Host "[Packaging] stop processes locking $dist"
+    Get-Process PerfPilot -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host ("[Packaging] stop PerfPilot pid={0} path={1}" -f $_.Id, $_.Path)
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
+    Get-CimInstance Win32_Process -Filter "Name='adb.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+        $exe = [string]$_.ExecutablePath
+        if ($exe -and $exe.StartsWith($dist, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-Host ("[Packaging] stop bundled adb pid={0} path={1}" -f $_.ProcessId, $exe)
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Start-Sleep -Seconds 1
+}
+
+$BasePython = Get-BuildPython
+Assert-64BitPython $BasePython
+Write-Host "Base Python: $BasePython"
+
+$VenvDir = Join-Path $Root ".venv-packaging"
+$Python = Join-Path $VenvDir "Scripts\python.exe"
+if (-not (Test-Path $Python)) {
+    Write-Host "Creating packaging venv: $VenvDir"
+    Invoke-Python $BasePython @("-m", "venv", $VenvDir)
+}
+Assert-64BitPython $Python
+Write-Host "Using Python: $Python"
+
+$Vendor = Join-Path $Root "vendor\platform-tools"
+$Zip = Join-Path $env:TEMP "platform-tools-windows.zip"
+$Url = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+
+if (-not (Test-Path (Join-Path $Vendor "adb.exe"))) {
+    Write-Host "Downloading Android platform-tools..."
+    Invoke-WebRequest -Uri $Url -OutFile $Zip
+    $Extract = Join-Path $env:TEMP "platform-tools-extract"
+    if (Test-Path $Extract) { Remove-Item $Extract -Recurse -Force }
+    Expand-Archive -Path $Zip -DestinationPath $Extract -Force
+    New-Item -ItemType Directory -Force -Path (Split-Path $Vendor) | Out-Null
+    if (Test-Path $Vendor) { Remove-Item $Vendor -Recurse -Force }
+    Move-Item (Join-Path $Extract "platform-tools") $Vendor
+}
+
+$WintunDll = Join-Path $Root "vendor\wintun\amd64\wintun.dll"
+if (-not (Test-Path $WintunDll)) {
+    Write-Host "Downloading WinTun..."
+    $WintunZip = Join-Path $env:TEMP "wintun-0.14.1.zip"
+    Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $WintunZip -UseBasicParsing
+    $WintunExtract = Join-Path $env:TEMP "wintun-extract"
+    if (Test-Path $WintunExtract) { Remove-Item $WintunExtract -Recurse -Force }
+    Expand-Archive -Path $WintunZip -DestinationPath $WintunExtract -Force
+    $Src = Get-ChildItem $WintunExtract -Recurse -Filter "wintun.dll" | Where-Object { $_.FullName -match "amd64" } | Select-Object -First 1
+    if (-not $Src) { throw "WinTun zip missing amd64\\wintun.dll" }
+    New-Item -ItemType Directory -Force -Path (Split-Path $WintunDll) | Out-Null
+    Copy-Item $Src.FullName $WintunDll -Force
+    $License = Get-ChildItem $WintunExtract -Recurse -Filter "LICENSE.txt" | Select-Object -First 1
+    if ($License) { Copy-Item $License.FullName (Join-Path $Root "vendor\wintun\LICENSE.txt") -Force }
+}
+if (-not (Test-Path (Join-Path $Vendor "adb.exe"))) {
+    throw "platform-tools missing adb.exe at $Vendor"
+}
+$Req = Join-Path $Root "packaging\requirements-build.txt"
+Invoke-Python $Python @("-m", "pip", "install", "-U", "pip")
+Invoke-Python $Python @("-m", "pip", "install", "-r", $Req)
+$TunDest = Join-Path $VenvDir "Lib\site-packages\pytun_pmd3\wintun\bin\amd64"
+if (Test-Path $WintunDll) {
+    New-Item -ItemType Directory -Force -Path $TunDest | Out-Null
+    Copy-Item $WintunDll (Join-Path $TunDest "wintun.dll") -Force
+    Write-Host "[Packaging] wintun.dll -> $TunDest"
+}
+Stop-LockedDist
+Invoke-Python $Python @("-m", "PyInstaller", "--noconfirm", "--clean", (Join-Path $Root "packaging\perfpilot.spec"))
+
+$Out = Join-Path $Root "dist\PerfPilot\PerfPilot.exe"
+if (-not (Test-Path $Out)) {
+    throw "PyInstaller finished but $Out is missing"
+}
+
+$DoctorText = (& $Out --doctor | Out-String)
+if ($LASTEXITCODE -ne 0) {
+    throw "Packaged PerfPilot --doctor failed with exit $LASTEXITCODE"
+}
+try {
+    $Doctor = $DoctorText | ConvertFrom-Json
+} catch {
+    throw "Packaged PerfPilot --doctor returned invalid JSON: $DoctorText"
+}
+if (-not $Doctor.portableReady) {
+    $Details = ($Doctor.hints | ForEach-Object { "- $_" }) -join [Environment]::NewLine
+    throw "Packaged runtime is incomplete:$([Environment]::NewLine)$Details"
+}
+Write-Host ("[Packaging] doctor passed: adb={0}; pymobiledevice3={1}; arch={2}" -f $Doctor.adbVersion, $Doctor.pymobiledevice3Version, $Doctor.pythonArchitecture)
+foreach ($Collector in @("android", "ios")) {
+    & $Out --collect $Collector --help | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged $Collector collector smoke test failed with exit $LASTEXITCODE"
+    }
+    Write-Host "[Packaging] $Collector collector smoke test passed"
+}
+
+$Archive = Join-Path $Root "dist\PerfPilot-portable-x64.zip"
+if (Test-Path $Archive) { Remove-Item $Archive -Force }
+Compress-Archive -Path (Join-Path $Root "dist\PerfPilot") -DestinationPath $Archive -CompressionLevel Optimal
+if (-not (Test-Path $Archive)) {
+    throw "Failed to create portable archive: $Archive"
+}
+
+Write-Host ""
+Write-Host "Build complete: $Out"
+Write-Host "Portable archive: $Archive"
+Write-Host "Send the ZIP as-is. Recipients do not need Python or ADB installed."
+Write-Host "iPhone users still need Apple Mobile Device support (iTunes or Apple Devices)."

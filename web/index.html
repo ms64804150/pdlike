@@ -21,29 +21,189 @@
     </aside>
 
     <main class="main-content">
-      <header class="topbar"><div><p class="eyebrow">PERFORMANCE LAB / LOCAL AGENT</p><h1 id="page-title">监测首页</h1></div><div class="top-actions"><span id="connection-pill" class="pill muted">正在检测设备</span><button class="icon-button" title="刷新数据" id="refresh-button">↻</button><div class="avatar">Y</div></div></header>
+      <header class="topbar"><div><p class="eyebrow">PERFORMANCE LAB / LOCAL AGENT</p><h1 id="page-title">监测首页</h1></div><div class="top-actions"><span id="connection-pill" class="pill muted">正在检测设备</span><button type="button" class="icon-button" title="刷新数据" id="refresh-button" aria-label="刷新数据">↻</button><div class="avatar">Y</div></div></header>
 
       <section id="overview-view" class="view active-view">
         <div class="hero-strip"><div><p class="eyebrow coral">READY WHEN YOU ARE</p><h2>把一次性能测试，变成一条清晰的证据链。</h2><p class="hero-copy">选择设备和应用，先做能力预检，再进入实时监控。所有数据留在这台电脑上。</p></div><div class="hero-art"><span class="pulse-ring"></span><span class="hero-number">01</span><small>LOCAL<br>SESSION</small></div></div>
         <div class="step-grid">
           <section class="panel step-panel"><div class="step-heading"><span class="step-number">01</span><div><p class="eyebrow">DEVICE</p><h3>连接设备</h3></div><span id="device-state" class="state-badge waiting">检测中</span></div><div id="device-list" class="device-list"><div class="empty-state">正在扫描 USB / ADB 设备…</div></div></section>
-          <section class="panel step-panel"><div class="step-heading"><span class="step-number">02</span><div><p class="eyebrow">APPLICATION</p><h3>选择监测应用</h3></div></div><div class="search-box"><span>⌕</span><input id="app-search" placeholder="搜索应用名称或 Bundle ID"></div><div id="app-list" class="app-list"><div class="empty-state">先选择一个设备</div></div></section>
+          <section class="panel step-panel"><div class="step-heading"><span class="step-number">02</span><div><p class="eyebrow">APPLICATION</p><h3>选择监测应用</h3></div></div><div class="search-box"><span>⌕</span><input id="app-search" placeholder="搜索应用包名"></div><div id="app-list" class="app-list"><div class="empty-state">先选择一个设备</div></div></section>
           <section class="panel step-panel config-panel"><div class="step-heading"><span class="step-number">03</span><div><p class="eyebrow">CAPABILITY CHECK</p><h3>监测配置</h3></div></div><p class="muted-copy">能力预检会决定真实可用的指标，不会用 0 填充缺失数据。</p><div id="capability-list" class="capability-list"></div><button id="start-button" class="primary-button" disabled><span>开始监测</span><b>→</b></button></section>
         </div>
       </section>
 
       <section id="monitor-view" class="view">
-        <div class="monitor-header panel"><div><div class="live-label"><span class="live-dot"></span><span id="monitor-status">正在监测</span></div><h2 id="monitor-app">等待目标应用</h2><p id="monitor-device" class="muted-copy"></p></div><div class="monitor-meta"><div><small>SESSION TIME</small><strong id="elapsed">00:00</strong></div><div><small>DATA POINTS</small><strong id="sample-count">0</strong></div><button id="stop-button" class="danger-button">停止监测</button></div></div>
-        <div class="metric-grid"><article class="metric-card fps-card"><div class="metric-label"><span>FPS</span><em class="quality available">LIVE</em></div><strong id="fps-value">--</strong><small>当前帧率 · 平滑窗口</small><div class="metric-foot"><span>平均 <b id="fps-average">--</b></span><span>最低 <b id="fps-min">--</b></span><span>状态 <b class="good">流畅</b></span></div></article><article class="metric-card"><div class="metric-label"><span>APP CPU</span><em class="quality available">AVAILABLE</em></div><strong id="cpu-value">--</strong><small>目标进程 CPU 占用</small><div class="mini-track"><i id="cpu-bar"></i></div></article><article class="metric-card"><div class="metric-label"><span>MEMORY</span><em class="quality available">RSS</em></div><strong id="memory-value">--</strong><small>目标进程常驻内存</small><div class="metric-foot"><span>峰值 <b id="memory-peak">--</b></span></div></article><article class="metric-card"><div class="metric-label"><span>GPU</span><em class="quality degraded">DEGRADED</em></div><strong id="gpu-value">--</strong><small>取决于设备能力</small><div class="metric-foot"><span>不支持时显示原因</span></div></article></div>
-        <div class="chart-grid"><article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">FRAME PACING</p><h3>FPS 趋势</h3></div><span class="chart-value" id="chart-fps-label">--</span></div><canvas id="fps-chart" height="170"></canvas></article><article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">RESOURCE LOAD</p><h3>CPU / Memory</h3></div><span class="chart-value" id="chart-resource-label">等待数据</span></div><canvas id="resource-chart" height="170"></canvas></article></div>
-        <div class="lower-grid"><section class="panel events-panel"><div class="section-heading"><div><p class="eyebrow">SIGNALS</p><h3>异常事件</h3></div><span id="event-count" class="count-badge">0</span></div><div id="event-list" class="event-list"><div class="empty-state">采集中，异常会出现在这里</div></div></section><section class="panel capability-summary"><div class="section-heading"><div><p class="eyebrow">CAPABILITY</p><h3>指标覆盖</h3></div></div><div id="monitor-capabilities" class="coverage-list"></div></section></div>
+        <div id="monitor-tabs" class="monitor-tabs" hidden></div>
+        <div class="monitor-header panel"><div><div class="live-label"><span class="live-dot"></span><span id="monitor-status">等待监测</span></div><h2 id="monitor-app">等待目标应用</h2><p id="monitor-device" class="muted-copy"></p></div><div class="monitor-meta"><div><small>SESSION TIME</small><strong id="elapsed">00:00</strong></div><div><small>DATA POINTS</small><strong id="sample-count">0</strong></div><button id="stop-button" class="danger-button">停止监测</button></div></div>
+        <div class="metric-subtabs" id="metric-subtabs" role="tablist">
+          <button type="button" class="metric-subtab active" data-metric="overview">概览</button>
+          <button type="button" class="metric-subtab" data-metric="cpu">CPU</button>
+          <button type="button" class="metric-subtab" data-metric="memory">Memory</button>
+          <button type="button" class="metric-subtab" data-metric="fps">FPS</button>
+          <button type="button" class="metric-subtab" data-metric="gpu">GPU</button>
+          <button type="button" class="metric-subtab" data-metric="network">Network</button>
+          <button type="button" class="metric-subtab" data-metric="battery">Battery</button>
+          <button type="button" class="metric-subtab" data-metric="logs">日志</button>
+        </div>
+        <aside id="timeline-inspect" class="panel timeline-inspect" hidden>
+          <div class="timeline-inspect-head"><div><p class="eyebrow">TIME SYNC</p><h3>时间点 <span id="inspect-clock">--</span></h3></div><button type="button" id="inspect-live" class="inspect-live-btn">回到实时</button></div>
+          <div class="inspect-grid">
+            <div><small>FPS</small><b id="inspect-fps">--</b></div>
+            <div><small>CPU</small><b id="inspect-cpu">--</b></div>
+            <div><small>Memory</small><b id="inspect-memory">--</b></div>
+            <div id="inspect-native-cell" hidden><small>Native PSS</small><b id="inspect-native">--</b></div>
+            <div id="inspect-swap-cell" hidden><small>Swap PSS</small><b id="inspect-swap">--</b></div>
+            <div><small>GPU</small><b id="inspect-gpu">不支持</b></div>
+            <div><small>Network</small><b id="inspect-network">不支持</b></div>
+          </div>
+        </aside>
+        <div id="metric-pane-overview" class="metric-pane">
+        <div class="metric-grid"><article class="metric-card fps-card"><div class="metric-label"><span>FPS</span><em class="quality available">LIVE</em></div><strong id="fps-value">--</strong><small>当前帧率 · 平滑窗口</small><div class="metric-foot"><span>平均 <b id="fps-average">--</b></span><span>最低 <b id="fps-min">--</b></span><span>状态 <b class="good">流畅</b></span></div></article><article class="metric-card"><div class="metric-label"><span>APP CPU</span><em class="quality available">AVAILABLE</em></div><strong id="cpu-value">--</strong><small>目标进程 CPU 占用</small><div class="mini-track"><i id="cpu-bar"></i></div><div class="metric-foot"><span>≤25% 概率 <b id="cpu-le25">--</b></span><span>≤50% 概率 <b id="cpu-le50">--</b></span></div></article><article class="metric-card memory-card"><div class="metric-label"><span>MEMORY</span><em class="quality available">PSS</em></div><strong id="memory-value" class="mem-total">--</strong><small>目标进程 TOTAL PSS</small><div class="memory-extras"><label class="mem-opt"><input type="checkbox" id="opt-native-pss" checked><span class="swatch native"></span>Native PSS</label><label class="mem-opt"><input type="checkbox" id="opt-swap-pss" checked><span class="swatch swap"></span>Swap PSS</label></div><p id="memory-ios-hint" class="memory-hint" hidden>iOS 无法提供 Native PSS / Swap PSS，当前为 physFootprint。</p><div class="metric-foot memory-foot"><span class="mem-total">峰值 <b id="memory-peak">--</b></span><span id="memory-native-row" class="mem-native" hidden>Native <b id="memory-native">--</b></span><span id="memory-swap-row" class="mem-swap" hidden>Swap <b id="memory-swap">--</b></span></div></article><article class="metric-card"><div class="metric-label"><span>GPU</span><em class="quality degraded">DEGRADED</em></div><strong id="gpu-value">--</strong><small>取决于设备能力</small><div class="metric-foot"><span>不支持时显示原因</span></div></article></div>
+        <div class="chart-grid"><article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">FRAME PACING</p><h3>FPS 趋势</h3><div class="chart-legend"><span class="leg fps">FPS</span><span class="leg avg">平均值</span></div><p class="chart-axis-hint">纵轴：帧率 (FPS) · 横轴：时间 · 点击对齐该时刻</p></div><span class="chart-value" id="chart-fps-label">--</span></div><canvas id="fps-chart" height="200"></canvas></article><article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">RESOURCE LOAD</p><h3>CPU</h3><div class="chart-legend"><span class="leg cpu">App CPU</span><span class="leg avg">平均值</span></div><p class="chart-axis-hint">纵轴：占用 (%) · 横轴：时间 · 点击对齐该时刻</p></div><span class="chart-value" id="chart-resource-label">等待数据</span></div><canvas id="resource-chart" height="200"></canvas></article><article class="panel chart-card memory-chart-card"><div class="chart-title"><div><p class="eyebrow">PROCESS MEMORY</p><h3>Memory 趋势</h3><div class="chart-legend"><span class="leg total">TOTAL PSS</span><span class="leg native" id="legend-native" hidden>Native PSS</span><span class="leg swap" id="legend-swap" hidden>Swap PSS</span><span class="leg avg">平均值</span></div><p class="chart-axis-hint">纵轴：内存 (MB) · 横轴：时间 · 点击对齐该时刻</p></div><span class="chart-value" id="chart-memory-label">--</span></div><canvas id="memory-chart" height="220"></canvas></article></div>
+        <div class="lower-grid"><section class="panel events-panel"><div class="section-heading"><div><p class="eyebrow">SIGNALS</p><h3>异常事件</h3></div><span id="event-count" class="count-badge">0</span></div><div id="event-list" class="event-list"><div class="empty-state">开始监测后，异常会出现在这里</div></div></section><section class="panel capability-summary"><div class="section-heading"><div><p class="eyebrow">CAPABILITY</p><h3>指标覆盖</h3></div></div><div id="monitor-capabilities" class="coverage-list"></div></section></div>
+        </div>
+        <div id="metric-pane-cpu" class="metric-pane" hidden>
+          <section class="panel detail-page">
+            <div class="detail-head"><div><p class="eyebrow">RESOURCE LOAD</p><h3>CPU监控</h3><p class="detail-meta" id="cpu-detail-meta">source · 采样 · quality</p></div><em class="quality" id="cpu-detail-quality">AVAILABLE</em></div>
+            <dl class="detail-stats">
+              <div><dt>App CPU</dt><dd id="cpu-app-detail">--</dd></div>
+              <div><dt>System CPU</dt><dd id="cpu-sys-detail" class="unsupported">不支持</dd></div>
+            </dl>
+            <h4>CPU Core</h4>
+            <p class="muted-copy" id="cpu-core-hint">未采集各核占用，避免用 0 填充。</p>
+            <div id="cpu-core-list" class="core-list"></div>
+            <div class="detail-chart">
+              <div class="chart-title"><div><p class="eyebrow">LIVE</p><h3>CPU实时曲线</h3><p class="chart-axis-hint">纵轴：占用 (%) · 横轴：时间 · 点击对齐该时刻</p></div><span class="chart-value" id="cpu-detail-label">--</span></div>
+              <canvas id="cpu-detail-chart" height="220"></canvas>
+            </div>
+          </section>
+        </div>
+        <div id="metric-pane-memory" class="metric-pane" hidden>
+          <section class="panel detail-page">
+            <div class="detail-head"><div><p class="eyebrow">PROCESS MEMORY</p><h3>Memory</h3><p class="detail-meta" id="mem-detail-meta">source · 采样 · quality</p></div><em class="quality" id="mem-detail-quality">AVAILABLE</em></div>
+            <dl class="detail-stats">
+              <div><dt>App Memory</dt><dd id="mem-app-detail">--</dd></div>
+              <div><dt>PSS</dt><dd id="mem-pss-detail">--</dd></div>
+              <div><dt>Native Heap</dt><dd id="mem-native-detail">--</dd></div>
+              <div><dt>Swap PSS</dt><dd id="mem-swap-detail">--</dd></div>
+              <div><dt>Private Dirty</dt><dd id="mem-dirty-detail" class="unsupported">需能力支持</dd></div>
+              <div><dt>Java Heap</dt><dd id="mem-java-detail" class="unsupported">需能力支持</dd></div>
+              <div><dt>Graphics</dt><dd id="mem-gfx-detail" class="unsupported">不支持</dd></div>
+            </dl>
+            <div class="detail-chart">
+              <div class="chart-title"><div><p class="eyebrow">TREND</p><h3>Memory趋势</h3><p class="chart-axis-hint">纵轴：内存 (MB) · 横轴：时间 · 点击对齐该时刻</p></div><span class="chart-value" id="mem-detail-label">--</span></div>
+              <canvas id="mem-detail-chart" height="220"></canvas>
+            </div>
+            <h4>GC</h4>
+            <dl class="detail-stats">
+              <div><dt>GC次数</dt><dd class="unsupported">需 Target App SDK</dd></div>
+              <div><dt>GC耗时</dt><dd class="unsupported">需 Target App SDK</dd></div>
+            </dl>
+          </section>
+        </div>
+        <div id="metric-pane-fps" class="metric-pane" hidden>
+          <section class="panel detail-page">
+            <div class="detail-head"><div><p class="eyebrow">FRAME PACING</p><h3>FPS</h3><p class="detail-meta" id="fps-detail-meta">source · 采样 · quality</p></div><em class="quality" id="fps-detail-quality">AVAILABLE</em></div>
+            <dl class="detail-stats">
+              <div><dt>当前</dt><dd id="fps-now-detail">--</dd></div>
+              <div><dt>平均</dt><dd id="fps-avg-detail">--</dd></div>
+              <div><dt>最低</dt><dd id="fps-min-detail">--</dd></div>
+              <div><dt>最高</dt><dd id="fps-max-detail">--</dd></div>
+              <div><dt>P95</dt><dd id="fps-p95-detail">--</dd></div>
+            </dl>
+            <div class="detail-chart">
+              <div class="chart-title"><div><p class="eyebrow">LIVE</p><h3>FPS实时曲线</h3><p class="chart-axis-hint">纵轴：帧率 (FPS) · 横轴：时间 · 点击对齐该时刻</p></div><span class="chart-value" id="fps-detail-label">--</span></div>
+              <canvas id="fps-detail-chart" height="220"></canvas>
+            </div>
+          </section>
+        </div>
+        <div id="metric-pane-gpu" class="metric-pane" hidden>
+          <section class="panel detail-page">
+            <div class="detail-head"><div><p class="eyebrow">GPU</p><h3>GPU监控</h3><p class="detail-meta" id="gpu-detail-meta">source · 采样 · quality</p></div><em class="quality degraded" id="gpu-detail-quality">DEGRADED</em></div>
+            <dl class="detail-stats">
+              <div><dt>GPU</dt><dd id="gpu-now-detail">不支持</dd></div>
+            </dl>
+            <div class="unsupported-panel" id="gpu-unsupported">
+              <p>当前设备未提供 GPU 计数器</p>
+              <small id="gpu-unsupported-reason">不会用 0 填充缺失值。</small>
+            </div>
+            <div class="detail-chart" id="gpu-chart-wrap" hidden>
+              <div class="chart-title"><div><p class="eyebrow">LIVE</p><h3>GPU实时曲线</h3><p class="chart-axis-hint">纵轴：占用 (%) · 横轴：时间</p></div><span class="chart-value" id="gpu-detail-label">--</span></div>
+              <canvas id="gpu-detail-chart" height="220"></canvas>
+            </div>
+          </section>
+        </div>
+        <div id="metric-pane-network" class="metric-pane" hidden>
+          <section class="panel detail-page">
+            <div class="detail-head"><div><p class="eyebrow">TRAFFIC</p><h3>Network</h3><p class="detail-meta" id="net-detail-meta">source · 采样 · quality</p></div><em class="quality" id="net-detail-quality">UNSUPPORTED</em></div>
+            <dl class="detail-stats">
+              <div><dt>↑ Upload</dt><dd id="net-up-detail" class="unsupported">不支持</dd></div>
+              <div><dt>↓ Download</dt><dd id="net-down-detail" class="unsupported">不支持</dd></div>
+              <div><dt>Total Upload</dt><dd id="net-up-total" class="unsupported">不支持</dd></div>
+              <div><dt>Total Download</dt><dd id="net-down-total" class="unsupported">不支持</dd></div>
+            </dl>
+            <div class="unsupported-panel" id="net-unsupported">
+              <p>Phase 1 未采集 UID 流量</p>
+              <small>接口不可用时保留入口，但不展示伪造速率。</small>
+            </div>
+            <div class="detail-chart" id="net-chart-wrap" hidden>
+              <div class="chart-title"><div><p class="eyebrow">LIVE</p><h3>实时网络流量</h3></div><span class="chart-value" id="net-detail-label">--</span></div>
+              <canvas id="net-detail-chart" height="220"></canvas>
+            </div>
+          </section>
+        </div>
+        <div id="metric-pane-battery" class="metric-pane" hidden>
+          <section class="panel detail-page">
+            <div class="detail-head"><div><p class="eyebrow">POWER</p><h3>Battery</h3><p class="detail-meta" id="bat-detail-meta">source · 采样 · quality</p></div><em class="quality" id="bat-detail-quality">UNSUPPORTED</em></div>
+            <dl class="detail-stats">
+              <div><dt>电量</dt><dd id="bat-level-detail" class="unsupported">不支持</dd></div>
+              <div><dt>充电状态</dt><dd id="bat-charge-detail" class="unsupported">不支持</dd></div>
+            </dl>
+            <div class="unsupported-panel">
+              <p>Phase 1 未采集电池接口</p>
+              <small>不显示 0% 或过期值。</small>
+            </div>
+          </section>
+        </div>
+        <div id="metric-pane-logs" class="metric-pane" hidden>
+          <section class="panel detail-page">
+            <div class="detail-head"><div><p class="eyebrow">LOGCAT</p><h3>日志</h3><p class="detail-meta" id="log-detail-meta">需勾选后采集 logcat</p><label class="mem-opt log-opt" id="logcat-opt-row"><input type="checkbox" id="opt-logcat"><span>采集 logcat</span></label></div><em class="quality degraded" id="log-detail-quality">DEGRADED</em></div>
+            <div class="log-console" id="collector-log"><div class="empty-state">勾选「采集 logcat」后，才会显示该应用日志。</div></div>
+          </section>
+        </div>
       </section>
 
       <section id="devices-view" class="view"><div class="page-intro"><p class="eyebrow">CONNECTED HARDWARE</p><h2>设备管理</h2><p>当前 Agent 发现的设备与配对状态。</p></div><div id="devices-table" class="panel devices-table"></div></section>
-      <section id="reports-view" class="view"><div class="page-intro"><p class="eyebrow">SESSION ARCHIVE</p><h2>检测报告</h2><p>每次停止监测都会保存一条历史记录，报告文件可从这里打开。</p></div><div id="report-list" class="report-list"><div class="empty-state">暂无历史报告</div></div></section>
-      <section id="settings-view" class="view"><div class="page-intro"><p class="eyebrow">LOCAL CONFIGURATION</p><h2>系统设置</h2><p>当前版本使用本机 Agent 管理设备连接和数据采集。</p></div><div class="panel settings-card"><div><h3>采样策略</h3><p>CPU / Memory 1s · FPS 1s 窗口 · 报告 HTML</p></div><span class="state-badge available">已启用</span></div></section>
+      <section id="reports-view" class="view"><div class="page-intro"><p class="eyebrow">SESSION ARCHIVE</p><h2>检测报告</h2><p>保存后的监测记录会出现在这里；报告生成完成后才能打开详情和导出。</p></div><div id="report-list" class="report-list"><div class="empty-state">暂无历史报告</div></div></section>
+      <section id="settings-view" class="view"><div class="page-intro"><p class="eyebrow">LOCAL CONFIGURATION</p><h2>系统设置</h2><p>当前版本使用本机 Agent 管理设备连接和数据采集。中心上报、版本对比和自动化 Marker 尚未接入。</p></div><div class="panel settings-card"><div><h3>采样策略</h3><p>CPU / Memory 1s · FPS 1s 窗口 · 结构化样本 + HTML</p></div><span class="state-badge available">已启用</span></div><div class="panel settings-card" style="margin-top:12px"><div><h3>本地数据目录</h3><p id="data-dir">加载中…</p></div><span class="state-badge available">Phase 1</span></div></section>
     </main>
   </div>
-  <script src="/app.js"></script>
+  <div id="app-dialog" class="app-dialog" hidden>
+    <div class="app-dialog-card" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title">
+      <h3 id="app-dialog-title">监测异常</h3>
+      <p id="app-dialog-message"></p>
+      <button type="button" id="app-dialog-ok" class="primary-button">确定</button>
+    </div>
+  </div>
+  <div id="stop-dialog" class="app-dialog" hidden>
+    <div class="app-dialog-card stop-dialog-card" role="dialog" aria-modal="true" aria-labelledby="stop-dialog-title">
+      <h3 id="stop-dialog-title">结束本次监测？</h3>
+      <dl class="stop-stats">
+        <div><dt>监测时长</dt><dd id="stop-duration">--</dd></div>
+        <div><dt>数据点</dt><dd id="stop-samples">0</dd></div>
+        <div><dt>FPS平均</dt><dd id="stop-fps-avg">--</dd></div>
+        <div><dt>FPS最低</dt><dd id="stop-fps-min">--</dd></div>
+        <div><dt>CPU平均</dt><dd id="stop-cpu-avg">--</dd></div>
+        <div><dt>Memory平均</dt><dd id="stop-mem-avg">--</dd></div>
+      </dl>
+      <label class="stop-opt"><input type="checkbox" id="stop-save" checked>保存监测数据</label>
+      <label class="stop-opt"><input type="checkbox" id="stop-report" checked>自动生成检测报告</label>
+      <div class="stop-actions">
+        <button type="button" id="stop-dialog-cancel" class="ghost-button">取消</button>
+        <button type="button" id="stop-dialog-confirm" class="danger-button">结束监测</button>
+      </div>
+    </div>
+  </div>
+  <script src="/app.js?v=20260915e"></script>
 </body>
 </html>
