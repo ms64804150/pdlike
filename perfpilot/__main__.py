@@ -46,7 +46,10 @@ def _open_browser(url: str) -> None:
         except OSError as error:
             log.warning("[UI] openBrowser startfile failed url=%s err=%s", url, error)
         try:
-            subprocess.Popen(["cmd", "/c", "start", "", url])
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", url],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
             log.info("[UI] openBrowser success method=cmd-start url=%s", url)
             return
         except OSError as error:

@@ -1,2 +1,0 @@
-2026-09-15 17:28:12,980 [INFO] [Agent] logFile ready path=D:\pdlike\.doctor-test4\PerfPilot\logs\agent.log
-2026-09-15 17:28:12,982 [INFO] [Agent] path ready pid=25376 processChars=2185 childChars=1365 extras=['D:\\pdlike\\dist\\PerfPilot\\_internal\\vendor\\platform-tools'] writeProcessPath=False

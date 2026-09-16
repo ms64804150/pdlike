@@ -1,5 +1,11 @@
 # PerfPilot
 
+打包命令
+
+```PowerShell
+powershell -ExecutionPolicy Bypass -File .\packaging\build.ps1
+```
+
 本机性能监测 Agent：浏览器操作本机 HTTP 服务，由 Agent 调 Android ADB / iOS `pymobiledevice3` 采集，数据只写在这台电脑上。不构建 Android 采集 APK，也不使用设备端 TCP `receiver.py`。
 
 日常入口：

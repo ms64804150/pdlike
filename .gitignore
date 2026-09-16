@@ -51,6 +51,7 @@ web/PerfPilot/
 web/PerfPilot.zip
 
 # Test / temp
+.doctor-test*/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

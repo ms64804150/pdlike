@@ -17,12 +17,16 @@ datas = [
     (str(ROOT / "web" / "index.html"), "web"),
     (str(ROOT / "web" / "app.js"), "web"),
     (str(ROOT / "web" / "styles.css"), "web"),
-    (str(ROOT / "adb_fps.py"), "."),
-    (str(ROOT / "ios_perf.py"), "."),
 ]
 platform_tools = ROOT / "vendor" / "platform-tools"
 if platform_tools.is_dir():
-    datas.append((str(platform_tools), "vendor/platform-tools"))
+    # PerfPilot only invokes adb. The rest of platform-tools (fastboot,
+    # sqlite3, filesystem utilities, etc.) adds several megabytes but is
+    # never used at runtime.
+    for name in ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "NOTICE.txt"):
+        source = platform_tools / name
+        if source.is_file():
+            datas.append((str(source), "vendor/platform-tools"))
 
 binaries = []
 hiddenimports = [
@@ -69,7 +73,9 @@ def _include_package(name: str, recursive_meta: bool = False) -> None:
                 pass
     if collect_all is not None:
         try:
-            pkg_datas, pkg_binaries, pkg_hidden = collect_all(name)
+            # Python modules are already stored in the PYZ. Copying their
+            # source files again as data needlessly duplicates them.
+            pkg_datas, pkg_binaries, pkg_hidden = collect_all(name, include_py_files=False)
             datas.extend(pkg_datas)
             binaries.extend(pkg_binaries)
             hiddenimports.extend(pkg_hidden)
@@ -88,6 +94,16 @@ for extra in (
     "pytun_pmd3",
 ):
     _include_package(extra)
+
+# This is an x64-only build. collect_all("pytun_pmd3") also brings WinTun
+# binaries for x86, ARM, and ARM64; retain only the amd64 runtime.
+def _keep_x64_wintun(item: tuple[str, str]) -> bool:
+    destination = str(item[1]).replace("\\", "/").lower()
+    return "pytun_pmd3/wintun/bin/" not in destination or "/amd64" in destination
+
+
+datas = [item for item in datas if _keep_x64_wintun(item)]
+binaries = [item for item in binaries if _keep_x64_wintun(item)]
 
 wintun_dll = ROOT / "vendor" / "wintun" / "amd64" / "wintun.dll"
 if wintun_dll.is_file():
@@ -122,7 +138,25 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "numpy", "pandas"],
+    excludes=[
+        "tkinter",
+        "matplotlib",
+        "numpy",
+        "pandas",
+        # Optional pymobiledevice3 features not used by PerfPilot. PyAV and
+        # Pillow support screen streaming/WebInspector, while IPython and
+        # its helpers only support interactive developer shells.
+        "av",
+        "PIL",
+        "IPython",
+        "jedi",
+        "parso",
+        "matplotlib_inline",
+        "stack_data",
+        "asttokens",
+        "executing",
+        "pure_eval",
+    ],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
@@ -137,6 +171,9 @@ exe = EXE(
     strip=False,
     upx=False,
     console=True,
+    # Preserve stdout/stderr for --doctor and collector pipes, but hide the
+    # console immediately when users launch the executable by double-click.
+    hide_console="hide-early",
     disable_windowed_traceback=False,
 )
 coll = COLLECT(

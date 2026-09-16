@@ -127,31 +127,35 @@ if (-not (Test-Path $Out)) {
 }
 
 $Internal = Join-Path $Root "dist\PerfPilot\_internal"
-# sslpsk_pmd3's Windows extension looks for the conventional OpenSSL names,
-# while recent uv/Python distributions ship the same DLLs with an -x64 suffix.
-# Keep both names in the portable bundle.
-foreach ($Dll in @("libssl-3", "libcrypto-3")) {
-    $suffixed = Join-Path $Internal ("{0}-x64.dll" -f $Dll)
-    $plain = Join-Path $Internal ("{0}.dll" -f $Dll)
-    if ((Test-Path $suffixed) -and -not (Test-Path $plain)) {
-        Copy-Item -LiteralPath $suffixed -Destination $plain
-        Write-Host ("[Packaging] add OpenSSL compatibility DLL: {0}" -f (Split-Path $plain -Leaf))
-    }
+# sslpsk_pmd3's OpenSSL 3 extension currently imports the legacy Windows
+# filename even though it uses the OpenSSL 3 ABI. Python ships the required
+# OpenSSL 3 DLL with its real -x64 name, so add only the alias the extension
+# requests. Plain libssl-3.dll/libcrypto-3.dll copies are not referenced and
+# would duplicate another ~9 MB in the portable bundle.
+$SslSource = Join-Path $Internal "libssl-3-x64.dll"
+$SslCompat = Join-Path $Internal "libssl-1_1-x64.dll"
+if ((Test-Path $SslSource) -and -not (Test-Path $SslCompat)) {
+    Copy-Item -LiteralPath $SslSource -Destination $SslCompat
+    Write-Host ("[Packaging] add OpenSSL compatibility DLL: {0}" -f (Split-Path $SslCompat -Leaf))
 }
 
+$PreviousPerfPilotData = $env:PERFPILOT_DATA
+$BuildTestData = Join-Path $env:TEMP ("perfpilot-build-test-{0}" -f [guid]::NewGuid())
+New-Item -ItemType Directory -Force -Path $BuildTestData | Out-Null
+$env:PERFPILOT_DATA = $BuildTestData
 $DoctorStdout = Join-Path $env:TEMP ("perfpilot-doctor-{0}.out" -f [guid]::NewGuid())
 $DoctorStderr = Join-Path $env:TEMP ("perfpilot-doctor-{0}.err" -f [guid]::NewGuid())
 try {
     $DoctorProcess = Start-Process -FilePath $Out -ArgumentList @("--doctor") -Wait -PassThru -NoNewWindow `
         -RedirectStandardOutput $DoctorStdout -RedirectStandardError $DoctorStderr
-    $DoctorText = Get-Content -LiteralPath $DoctorStdout -Raw -ErrorAction SilentlyContinue
+    $DoctorText = Get-Content -LiteralPath $DoctorStdout -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
     if ($null -eq $DoctorText) {
         $DoctorText = ""
     } else {
         $DoctorText = $DoctorText.Trim()
     }
     if ($DoctorProcess.ExitCode -ne 0) {
-        $DoctorError = (Get-Content -LiteralPath $DoctorStderr -Raw -ErrorAction SilentlyContinue).Trim()
+        $DoctorError = (Get-Content -LiteralPath $DoctorStderr -Raw -Encoding UTF8 -ErrorAction SilentlyContinue).Trim()
         throw "Packaged PerfPilot --doctor failed with exit $($DoctorProcess.ExitCode): $DoctorError"
     }
     # Keep only the JSON object in case a bootloader/runtime message is
@@ -181,6 +185,9 @@ if (-not $Doctor.portableReady) {
     $Details = ($Doctor.hints | ForEach-Object { "- $_" }) -join [Environment]::NewLine
     throw "Packaged runtime is incomplete:$([Environment]::NewLine)$Details"
 }
+if (-not $Doctor.iosTcpTunnel.ok) {
+    throw "Packaged iOS TCP tunnel dependency failed: $($Doctor.iosTcpTunnel.error)"
+}
 Write-Host ("[Packaging] doctor passed: adb={0}; pymobiledevice3={1}; arch={2}" -f $Doctor.adbVersion, $Doctor.pymobiledevice3Version, $Doctor.pythonArchitecture)
 foreach ($Collector in @("android", "ios")) {
     & $Out --collect $Collector --help | Out-Null
@@ -189,6 +196,12 @@ foreach ($Collector in @("android", "ios")) {
     }
     Write-Host "[Packaging] $Collector collector smoke test passed"
 }
+if ($null -eq $PreviousPerfPilotData) {
+    Remove-Item Env:PERFPILOT_DATA -ErrorAction SilentlyContinue
+} else {
+    $env:PERFPILOT_DATA = $PreviousPerfPilotData
+}
+Remove-Item -LiteralPath $BuildTestData -Recurse -Force -ErrorAction SilentlyContinue
 
 $Archive = Join-Path $Root "dist\PerfPilot-portable-x64.zip"
 if (Test-Path $Archive) { Remove-Item $Archive -Force }
