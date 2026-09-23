@@ -73,3 +73,17 @@ macOS：
 ```
 
 健康输出中的 `portableReady: true` 表示应用自身布局、内置 ADB 和运行依赖可用。设备信任状态不属于包完整性。
+
+## GitHub Releases 更新源
+
+客户端默认查询公开仓库 `ms64804150/pdlike` 的 Latest Release。发布新版本时：
+
+1. 将 `perfpilot/__init__.py` 的 `__version__` 更新为新版本号，例如 `0.3.0`。
+2. 分别在 Windows 和 macOS 原生构建。
+3. 在 GitHub 创建正式 Release，Tag 使用 `v0.3.0`。
+4. 上传**准确使用以下文件名**的附件：
+   - `PerfPilot-portable-x64.zip`
+   - `PerfPilot-macos-arm64.dmg`（Apple Silicon）
+   - `PerfPilot-macos-x86_64.dmg`（Intel，如有）
+
+客户端在“系统设置 → 软件更新”中检查更新；仅当 Release 的版本号更高且包含当前平台对应附件时才提示下载。GitHub Release 附件的 SHA-256 会随 API 返回，供后续自动安装流程校验使用。

@@ -123,7 +123,53 @@ function setView(view) {
   $('page-title').textContent = titles[view];
   if (view === 'devices') renderDevicesTable();
   if (view === 'reports') renderReports();
+  if (view === 'settings') renderUpdateSettings();
   if (view === 'monitor') renderActiveMonitor();
+}
+
+function renderUpdateSettings() {
+  const view = $('settings-view');
+  if (!view || $('update-settings-card')) return;
+  const card = document.createElement('div');
+  card.id = 'update-settings-card';
+  card.className = 'panel settings-card';
+  card.style.marginTop = '12px';
+  card.innerHTML = '<div><h3>软件更新</h3><p id="update-status">通过 GitHub Releases 检查新版。</p><small id="update-notes" class="muted-copy"></small></div><button type="button" id="check-update" class="ghost-button">检查更新</button>';
+  view.appendChild(card);
+  $('check-update').addEventListener('click', onUpdateButtonClick);
+}
+
+function onUpdateButtonClick() {
+  const url = $('check-update')?.dataset.downloadUrl;
+  if (url) window.open(url, '_blank');
+  else checkForUpdates();
+}
+
+async function checkForUpdates() {
+  const button = $('check-update');
+  const status = $('update-status');
+  const notes = $('update-notes');
+  if (button) button.disabled = true;
+  if (status) status.textContent = '正在检查 GitHub Releases…';
+  if (notes) notes.textContent = '';
+  try {
+    const result = await api('/api/v1/update');
+    if (!result.ok) throw new Error(result.error || '无法检查更新');
+    if (!result.available) {
+      if (status) status.textContent = `当前已是最新版本 v${result.currentVersion}`;
+      return;
+    }
+    if (status) status.textContent = `发现 v${result.latestVersion}，已验证适配包：${result.assetName}`;
+    if (notes) notes.textContent = result.releaseNotes || '点击“下载更新”获取新版本。';
+    if (button) {
+      button.textContent = '下载更新';
+      button.dataset.downloadUrl = result.downloadUrl || result.releaseUrl || '';
+    }
+  } catch (error) {
+    if (status) status.textContent = error.message || '检查更新失败';
+  } finally {
+    if (button && button.textContent !== '下载更新') button.disabled = false;
+  }
 }
 
 function deviceIds(list) {

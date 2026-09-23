@@ -150,6 +150,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload.get("layoutOk"),
             )
             return self.send_json(payload)
+        if path == "/api/v1/update":
+            from .update import check_for_update
+
+            return self.send_json(check_for_update())
         if path == "/api/v1/devices":
             query = parse_qs(urlparse(self.path).query)
             connected = registry.refresh(timeout=8) if query.get("fresh") else registry.snapshot()
