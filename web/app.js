@@ -13,8 +13,46 @@ const state = {
   selectGen: 0,
   selectPendingId: null,
   metricTab: 'overview',
+  memoryScale: 'delta',
+  chartWindow: 'recent',
+  uiHeartbeat: null,
 };
 const $ = (id) => document.getElementById(id);
+
+const uiClientId = (() => {
+  const key = 'perfpilot-ui-client-id';
+  let value = sessionStorage.getItem(key);
+  if (!value) {
+    value = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+    sessionStorage.setItem(key, value);
+  }
+  return value;
+})();
+
+function signalUi(action, useBeacon = false) {
+  const body = JSON.stringify({ clientId: uiClientId });
+  const url = `/api/v1/ui/${action}`;
+  if (useBeacon && navigator.sendBeacon) {
+    navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
+    return;
+  }
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function startUiLifecycle() {
+  signalUi('connect');
+  state.uiHeartbeat = setInterval(() => signalUi('heartbeat'), 10000);
+}
+
+window.addEventListener('pagehide', () => {
+  if (state.uiHeartbeat) clearInterval(state.uiHeartbeat);
+  signalUi('disconnect', true);
+});
 
 function fetchErrorText(error) {
   const message = String((error && error.message) || '');
@@ -356,9 +394,9 @@ function stopTimerIfIdle() {
 function renderMonitorTabs() {
   const tabs = $('monitor-tabs');
   const sessions = visibleSessions();
-  if (!sessions.length) {
-    tabs.hidden = true;
-    tabs.innerHTML = '';
+    if (!sessions.length) {
+      tabs.hidden = true;
+      tabs.innerHTML = '<div class="empty-state">暂无监测会话</div>';
     return;
   }
   tabs.hidden = false;
@@ -468,9 +506,9 @@ function emptyMonitor() {
 function renderActiveMonitor() {
   renderMonitorTabs();
   const session = activeSession();
-  if (!session || session.closing) {
-    emptyMonitor();
-    return;
+    if (!session || session.closing) { 
+      emptyMonitor(); 
+      return; 
   }
   paintMonitorStatus(session);
   $('monitor-app').textContent = sessionAppTitle(session) || session.app.name;
@@ -483,7 +521,7 @@ function renderActiveMonitor() {
     session.device && (session.device.model || session.device.name),
   );
   $('monitor-capabilities').innerHTML = session.capabilities.map((item) => `<div class="coverage-item"><i class="${item.state === 'degraded' ? 'degraded' : ''}"></i>${item.label}<span>${item.state === 'available' ? '可用' : '降级'}</span></div>`).join('');
-  $('stop-button').disabled = session.status === 'disconnected' || session.status === 'finalizing' || session.stopping;
+    $('stop-button').disabled = session.status === 'disconnected' || session.status === 'finalizing' || session.stopping;
   $('event-count').textContent = String(session.eventCount);
   $('event-list').innerHTML = session.events.length
     ? session.events.map((item) => `<button type="button" class="event-item" data-inspect="${item.sampleIndex == null ? '' : item.sampleIndex}"><i></i><div><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.message)}</small></div></button>`).join('')
@@ -784,8 +822,9 @@ function handleEvent(runId, event) {
   if (event.type === 'sample') {
     session.samples.push(event.data);
     if (state.activeRunId === runId) {
+      const expandedWindow = maybeExpandChartWindow(session);
       paintMonitorStatus(session);
-      updateMetrics(session, inspectSample(session) || event.data, false);
+      updateMetrics(session, inspectSample(session) || event.data, expandedWindow);
     }
     return;
   }
@@ -1170,9 +1209,13 @@ function updateDetailPane(session, sample) {
 
 function drawDetailCharts(session, samples) {
   const extras = (session && session.extras) || {};
-  const list = samples || [];
-  const times = sampleTimes(list);
-  const marker = inspectMarkerTime(session, list);
+  const visible = visibleChartData(samples);
+  const list = visible.samples;
+  const times = visible.times;
+  const selectedMarker = inspectMarkerTime(session, samples || []);
+  const marker = selectedMarker != null && selectedMarker >= (times[0] ?? 0) && selectedMarker <= (times.at(-1) ?? 0)
+    ? selectedMarker
+    : null;
   const tab = (session && session.metricTab) || state.metricTab || 'overview';
   if (tab === 'cpu' && $('cpu-detail-chart')) {
     const cpuValues = list.map((item) => item.cpu);
@@ -1204,15 +1247,8 @@ function drawDetailCharts(session, samples) {
     const memValues = list.map((item) => item.memory);
     const nativeValues = list.map((item) => item.nativePss);
     const swapValues = list.map((item) => item.swapPss);
-    const memPool = [
-      ...memValues.filter(Number.isFinite),
-      ...(extras.nativePss ? nativeValues.filter(Number.isFinite) : []),
-      ...(extras.swapPss ? swapValues.filter(Number.isFinite) : []),
-    ];
-    const memSeries = [{ values: memValues, color: '#2c9b6d', label: 'TOTAL PSS' }];
-    if (extras.nativePss) memSeries.push({ values: nativeValues, color: '#6b5ce7', label: 'Native PSS' });
-    if (extras.swapPss) memSeries.push({ values: swapValues, color: '#e6a84a', label: 'Swap PSS' });
-    const memY = chartYAxis('mem', [memPool]);
+    const memSeries = memorySeries(memValues, nativeValues, swapValues, extras);
+    const memY = chartYAxis('mem', memSeries.map((series) => series.values));
     drawChart($('mem-detail-chart'), {
       series: memSeries,
       times,
@@ -1301,10 +1337,17 @@ function renderInspectPanel(session, sample) {
   const panel = $('timeline-inspect');
   if (!panel) return;
   const inspecting = Boolean(session && session.inspectIndex != null && sample);
-  panel.hidden = !inspecting;
+  const hasSample = Boolean(session && sample);
+  panel.hidden = !hasSample;
   const grid = document.querySelector('.metric-grid');
   if (grid) grid.classList.toggle('is-inspecting', inspecting);
-  if (!inspecting) return;
+  if (!hasSample) return;
+  const liveButton = $('inspect-live');
+  if (liveButton) {
+    liveButton.disabled = !inspecting;
+    liveButton.textContent = inspecting ? '回到实时' : '实时更新中';
+    liveButton.classList.toggle('is-live', !inspecting);
+  }
   const extras = session.extras || {};
   $('inspect-clock').textContent = formatInspectClock(sample);
   $('inspect-fps').textContent = fmtInspectValue(sample.fps, '', '--');
@@ -1350,9 +1393,11 @@ function clearInspect(session) {
   if (!session) return;
   session.inspectIndex = null;
   console.info('[TimelineSync] live runId=%s', session.runId);
-  hideTimelineInspect();
   const latest = session.samples.at(-1);
-  if (latest) updateMetrics(session, latest, true);
+  if (latest) {
+    renderInspectPanel(session, latest);
+    updateMetrics(session, latest, true);
+  }
   else resetMetricDisplay(session);
 }
 
@@ -1380,6 +1425,49 @@ function onChartClick(event) {
   if (x < meta.pad.l || x > meta.pad.l + meta.plotW) return;
   const timeMs = meta.t0 + ((x - meta.pad.l) / meta.plotW) * meta.tSpan;
   setInspectIndex(session, nearestSampleIndex(session.samples, timeMs), 'chart');
+}
+
+function chartTimeFromPointer(event, canvas) {
+  const meta = canvas?._chartMeta;
+  if (!meta) return null;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  if (x < meta.pad.l || x > meta.pad.l + meta.plotW) return null;
+  return meta.t0 + ((x - meta.pad.l) / meta.plotW) * meta.tSpan;
+}
+
+function inspectFromPointer(event, canvas, source) {
+  const session = activeSession();
+  if (!session || !session.samples.length) return false;
+  const timeMs = chartTimeFromPointer(event, canvas);
+  if (timeMs == null) return false;
+  setInspectIndex(session, nearestSampleIndex(session.samples, timeMs), source);
+  return true;
+}
+
+function onChartPointerDown(event) {
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  const canvas = event.currentTarget;
+  if (!inspectFromPointer(event, canvas, 'chart-drag')) return;
+  canvas._chartDrag = true;
+  canvas.classList.add('is-dragging');
+  canvas.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+}
+
+function onChartPointerMove(event) {
+  const canvas = event.currentTarget;
+  if (!canvas._chartDrag) return;
+  inspectFromPointer(event, canvas, 'chart-drag');
+  event.preventDefault();
+}
+
+function endChartPointer(event) {
+  const canvas = event.currentTarget;
+  if (!canvas._chartDrag) return;
+  canvas._chartDrag = false;
+  canvas.classList.remove('is-dragging');
+  if (canvas.hasPointerCapture?.(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
 }
 
 function onEventListClick(event) {
@@ -1428,7 +1516,7 @@ function updateMetrics(session, sample, forceCharts) {
   if (extras.nativePss && Number.isFinite(sample.nativePss)) memBits.push(`N ${sample.nativePss.toFixed(1)}`);
   if (extras.swapPss && Number.isFinite(sample.swapPss)) memBits.push(`S ${sample.swapPss.toFixed(1)}`);
   if ($('chart-memory-label')) $('chart-memory-label').textContent = memBits.join(' · ') || '--';
-  if (session.inspectIndex != null) renderInspectPanel(session, inspectSample(session) || sample);
+  renderInspectPanel(session, inspectSample(session) || sample);
   updateDetailPane(session, sample);
   if (forceCharts || nums.length % 2 === 0) drawCharts(nums, extras, inspectMarkerTime(session, nums));
 }
@@ -1451,6 +1539,58 @@ function finiteValues(lists) {
     });
   });
   return nums;
+}
+
+function relativeToFirst(values) {
+  const baseline = (values || []).find(Number.isFinite);
+  if (!Number.isFinite(baseline)) return values || [];
+  return values.map((value) => (Number.isFinite(value) ? value - baseline : value));
+}
+
+function memorySeries(memValues, nativeValues, swapValues, flags) {
+  const display = (values) => (state.memoryScale === 'delta' ? relativeToFirst(values) : values);
+  const series = [{ values: display(memValues), color: '#2c9b6d', label: 'TOTAL PSS' }];
+  if (flags.nativePss) series.push({ values: display(nativeValues), color: '#6b5ce7', label: 'Native PSS' });
+  if (flags.swapPss) series.push({ values: display(swapValues), color: '#e6a84a', label: 'Swap PSS' });
+  return series;
+}
+
+function syncMemoryScaleUi() {
+  const delta = state.memoryScale === 'delta';
+  let button = $('memory-axis-toggle');
+  if (!button) {
+    const value = $('chart-memory-label');
+    if (value && value.parentElement) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.id = 'memory-axis-toggle';
+      button.className = 'chart-scale-toggle';
+      button.addEventListener('click', toggleMemoryScale);
+      value.parentElement.insertBefore(button, value);
+    }
+  }
+  if (button) {
+    button.textContent = delta ? 'Δ 相对首帧' : '绝对值';
+    button.title = delta ? '点击切换为绝对值坐标' : '点击切换为相对首帧变化';
+    button.classList.toggle('is-delta', delta);
+  }
+  const hint = delta
+    ? '纵轴：相对首帧变化 (MB) · 横轴：时间 · 点击或拖动对齐该时刻'
+    : '纵轴：内存绝对值 (MB) · 横轴：时间 · 点击或拖动对齐该时刻';
+  const overviewHint = $('memory-chart')?.closest('.chart-card')?.querySelector('.chart-axis-hint');
+  const detailHint = $('mem-detail-chart')?.closest('.detail-chart')?.querySelector('.chart-axis-hint');
+  if (overviewHint) overviewHint.textContent = hint;
+  if (detailHint) detailHint.textContent = hint;
+}
+
+function toggleMemoryScale() {
+  state.memoryScale = state.memoryScale === 'delta' ? 'absolute' : 'delta';
+  syncMemoryScaleUi();
+  const session = activeSession();
+  if (!session) return;
+  const samples = session.samples || [];
+  drawCharts(samples, session.extras || {}, inspectMarkerTime(session, samples));
+  if ((session.metricTab || state.metricTab) === 'memory') drawDetailCharts(session, samples);
 }
 
 function niceCeil(value, steps) {
@@ -1496,13 +1636,35 @@ function memAxisMax(values) {
   return niceCeil(peak, 4);
 }
 
+function niceAxisStep(value) {
+  if (!Number.isFinite(value) || value <= 0) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  const normalized = value / magnitude;
+  const factor = [1, 2, 2.5, 5, 10].find((candidate) => normalized <= candidate) || 10;
+  return factor * magnitude;
+}
+
 function chartYAxis(kind, lists) {
-  // Live charts use a fixed scale. Re-scaling from the current peak makes
-  // the vertical axis jump every time a new sample arrives.
-  const yMax = kind === 'fps' ? 120 : kind === 'pct' ? 100 : kind === 'mem' ? 2048 : 10;
-  const step = yMax / 4;
-  console.info('[ChartAxis] fixed kind=%s yMin=0 yMax=%s step=%s', kind, yMax, step);
-  return { yMin: 0, yMax, step };
+  const values = finiteValues(lists);
+  if (!values.length) {
+    const yMax = kind === 'fps' ? 60 : kind === 'pct' ? 25 : 64;
+    return { yMin: 0, yMax, step: yMax / 4 };
+  }
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const minSpan = kind === 'fps' ? 3 : kind === 'pct' ? 2 : 1;
+  const span = Math.max(max - min, minSpan);
+  const padding = Math.max(span * 0.15, minSpan * 0.35);
+  let lower = min - padding;
+  const upper = max + padding;
+  // Only retain zero when it is already close to the data. A focused range
+  // makes small live fluctuations readable instead of flattening the curve.
+  if (min >= 0 && lower < 0 && min < span * 0.2) lower = 0;
+  const step = niceAxisStep((upper - lower) / 4);
+  const yMin = Math.floor(lower / step) * step;
+  const yMax = Math.max(yMin + step * 4, Math.ceil(upper / step) * step);
+  console.info('[ChartAxis] adaptive kind=%s min=%s max=%s yMin=%s yMax=%s step=%s', kind, min, max, yMin, yMax, step);
+  return { yMin, yMax, step };
 }
 
 function yTickValues(yMin, yMax, step) {
@@ -1552,6 +1714,65 @@ function sampleTimes(samples) {
     if (origin != null && Number.isFinite(item.time)) return (item.time - origin) * 1000;
     return index * 1000;
   });
+}
+
+function visibleChartData(samples) {
+  const all = samples || [];
+  const allTimes = sampleTimes(all);
+  if (state.chartWindow !== 'recent' || !allTimes.length) return { samples: all, times: allTimes };
+  const latest = allTimes.at(-1);
+  const cutoff = latest - 30000;
+  const first = allTimes.findIndex((time) => time >= cutoff);
+  const index = first < 0 ? 0 : first;
+  return { samples: all.slice(index), times: allTimes.slice(index) };
+}
+
+function maybeExpandChartWindow(session) {
+  if (state.chartWindow !== 'recent' || !session || session.inspectIndex == null) return false;
+  const times = sampleTimes(session.samples || []);
+  if (!times.length) return false;
+  const latest = times.at(-1);
+  const selectedIndex = Math.max(0, Math.min(session.inspectIndex, times.length - 1));
+  if (latest - times[selectedIndex] <= 30000) return false;
+  state.chartWindow = 'all';
+  syncChartWindowUi();
+  return true;
+}
+
+function syncChartWindowUi() {
+  const recent = state.chartWindow === 'recent';
+  let toggle = $('chart-window-toggle');
+  if (!toggle || toggle.tagName === 'BUTTON') {
+    if (toggle) toggle.remove();
+    const head = $('timeline-inspect')?.querySelector('.timeline-inspect-head');
+    if (!head) return;
+    const controls = document.createElement('div');
+    controls.className = 'timeline-controls';
+    controls.innerHTML = '<label class="chart-window-switch"><span>趋势范围</span><b class="window-option recent-option">最近 30 秒</b><input id="chart-window-toggle" type="checkbox"><i aria-hidden="true"></i><b class="window-option all-option">全部历史</b><span class="sr-only" id="chart-window-status"></span></label>';
+    const liveButton = $('inspect-live');
+    head.insertBefore(controls, liveButton);
+    toggle = $('chart-window-toggle');
+    toggle.addEventListener('change', toggleChartWindow);
+  }
+  toggle.checked = !recent;
+  const switchLabel = toggle.closest('.chart-window-switch');
+  switchLabel?.classList.toggle('is-recent', recent);
+  switchLabel?.classList.toggle('is-all', !recent);
+  toggle.setAttribute('aria-label', recent ? '当前显示最近 30 秒，点击切换到全部历史' : '当前显示全部历史，点击切换到最近 30 秒');
+  toggle.title = recent ? '当前显示最近 30 秒，点击切换到全部历史' : '当前显示全部历史，点击切换到最近 30 秒';
+  const status = $('chart-window-status');
+  if (status) status.textContent = recent ? '当前：最近 30 秒' : '当前：全部历史';
+}
+
+function toggleChartWindow() {
+  state.chartWindow = state.chartWindow === 'recent' ? 'all' : 'recent';
+  syncChartWindowUi();
+  const session = activeSession();
+  if (!session) return;
+  clearInspect(session);
+  const samples = session.samples || [];
+  drawCharts(samples, session.extras || {}, inspectMarkerTime(session, samples));
+  if ((session.metricTab || state.metricTab) !== 'overview') drawDetailCharts(session, samples);
 }
 
 function drawChart(canvas, options) {
@@ -1717,9 +1938,13 @@ function drawChart(canvas, options) {
 }
 
 function drawCharts(samples, extras, markerTime) {
-  const list = samples || [];
+  const visible = visibleChartData(samples);
+  const list = visible.samples;
   const flags = extras || {};
-  const times = sampleTimes(list);
+  const times = visible.times;
+  const visibleMarker = markerTime != null && markerTime >= (times[0] ?? 0) && markerTime <= (times.at(-1) ?? 0)
+    ? markerTime
+    : null;
   const fpsValues = list.map((x) => x.fps);
   const cpuValues = list.map((x) => x.cpu);
   const memValues = list.map((x) => x.memory);
@@ -1733,7 +1958,7 @@ function drawCharts(samples, extras, markerTime) {
     yMax: fpsY.yMax,
     yStep: fpsY.step,
     ySuffix: 'FPS',
-    markerTime,
+    markerTime: visibleMarker,
   });
   const cpuY = chartYAxis('pct', [cpuValues]);
   drawChart($('resource-chart'), {
@@ -1743,19 +1968,12 @@ function drawCharts(samples, extras, markerTime) {
     yMax: cpuY.yMax,
     yStep: cpuY.step,
     ySuffix: '%',
-    markerTime,
+    markerTime: visibleMarker,
   });
   const memCanvas = $('memory-chart');
   if (!memCanvas) return;
-  const memPool = [
-    ...memValues.filter(Number.isFinite),
-    ...(flags.nativePss ? nativeValues.filter(Number.isFinite) : []),
-    ...(flags.swapPss ? swapValues.filter(Number.isFinite) : []),
-  ];
-  const memSeries = [{ values: memValues, color: '#2c9b6d', label: 'TOTAL PSS' }];
-  if (flags.nativePss) memSeries.push({ values: nativeValues, color: '#6b5ce7', label: 'Native PSS' });
-  if (flags.swapPss) memSeries.push({ values: swapValues, color: '#e6a84a', label: 'Swap PSS' });
-  const memY = chartYAxis('mem', [memPool]);
+  const memSeries = memorySeries(memValues, nativeValues, swapValues, flags);
+  const memY = chartYAxis('mem', memSeries.map((series) => series.values));
   drawChart(memCanvas, {
     series: memSeries,
     times,
@@ -1763,7 +1981,7 @@ function drawCharts(samples, extras, markerTime) {
     yMax: memY.yMax,
     yStep: memY.step,
     ySuffix: 'MB',
-    markerTime,
+    markerTime: visibleMarker,
   });
 }
 
@@ -2098,6 +2316,8 @@ document.addEventListener('keydown', (event) => {
 on('opt-native-pss', 'change', persistMemoryExtras);
 on('opt-swap-pss', 'change', persistMemoryExtras);
 on('opt-logcat', 'change', persistMemoryExtras);
+on('memory-axis-toggle', 'click', toggleMemoryScale);
+on('chart-window-toggle', 'click', toggleChartWindow);
 on('inspect-live', 'click', () => {
   const session = activeSession();
   if (session) clearInspect(session);
@@ -2109,8 +2329,16 @@ on('metric-subtabs', 'click', (event) => {
 });
 ['fps-chart', 'resource-chart', 'memory-chart', 'fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart'].forEach((id) => {
   const canvas = $(id);
-  if (canvas) canvas.addEventListener('click', onChartClick);
+  if (!canvas) return;
+  canvas.addEventListener('click', onChartClick);
+  canvas.addEventListener('pointerdown', onChartPointerDown);
+  canvas.addEventListener('pointermove', onChartPointerMove);
+  canvas.addEventListener('pointerup', endChartPointer);
+  canvas.addEventListener('pointercancel', endChartPointer);
 });
+syncMemoryScaleUi();
+syncChartWindowUi();
+startUiLifecycle();
 load().then(watchDevices).catch((error) => {
   $('connection-pill').textContent = 'Agent 未启动';
   $('connection-pill').className = 'pill muted';

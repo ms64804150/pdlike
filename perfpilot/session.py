@@ -179,6 +179,11 @@ class SessionManager:
             return events.now_ms() - started < 8000
         return False
 
+    def has_active_collection(self) -> bool:
+        with self._lock:
+            sessions = tuple(self.runs.values())
+        return any(self._is_collecting(session) for session in sessions)
+
     def create(
         self,
         device: dict[str, Any],

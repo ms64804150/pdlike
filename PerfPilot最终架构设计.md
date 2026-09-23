@@ -8,11 +8,19 @@
 
 ## 1. 建设目标
 
-PerfPilot 最终需要支持三种使用方式：
+PerfPilot 最终需要支持四种使用方式：
 
 1. 测试人员安装客户端，连接手机后通过本地 Web 页面手动执行性能测试。
 2. 管理人员在中心后台查看客户端在线情况、测试次数、成功率、设备分布和测试报告。
 3. 自动化平台在执行 Appium、pytest、Airtest 等测试时，通过本地 Agent API 同步启动性能监测，并按功能模块生成报告。
+4. 发布流水线按 App 构建和场景自动选择性能基线，执行多轮自动化测试，发现回归后自动生成问题切片并执行质量门禁。
+
+最终形态不是单纯的“性能采集工具”，而是由两个平面组成的性能工程平台：
+
+- **数据平面**：Agent、采集器和自动化 Runner 靠近设备执行，保证断网时仍能完成采集并落盘。
+- **控制平面**：中心平台管理版本、基线、策略、脚本、任务、对比和问题闭环，不直接操作 USB，也不向 Agent 下发任意 Shell。
+
+平台应始终遵守以下数据原则：原始事实不可变、派生结果可重算、基线变更可审计、脚本制品可追溯、自动结论必须说明可比条件和算法版本。
 
 最终用户不需要安装 Python、配置虚拟环境或接触项目源码。Windows 首期发布为安装包：
 
@@ -46,25 +54,40 @@ flowchart LR
     subgraph Server[公司中心平台]
         Gateway[HTTPS API / WebSocket]
         Backend[PerfPilot Server]
+        Catalog[版本与场景目录]
+        Baseline[基线与策略服务]
+        Compare[对比与回归引擎]
+        Orchestrator[自动化任务编排]
+        Incident[异常与切片服务]
         Database[(PostgreSQL)]
         ObjectStore[(报告与样本存储)]
         Admin[管理与报告 Web]
 
         Gateway --> Backend
+        Backend --> Catalog
+        Backend --> Baseline
+        Backend --> Compare
+        Backend --> Orchestrator
+        Backend --> Incident
         Backend --> Database
         Backend --> ObjectStore
         Admin --> Gateway
     end
 
     subgraph Automation[自动化系统]
-        Runner[Appium / pytest / Airtest]
+        Runner[PerfPilot Automation Runner]
+        Framework[Appium / pytest / Airtest]
         CI[CI 流水线]
+
+        Runner --> Framework
     end
 
     Agent -->|HTTPS 上报 / WebSocket 心跳| Gateway
     Runner -->|localhost API| Agent
     CI -->|任务元数据 / 结果查询| Gateway
 ```
+
+中心平台首期可以是一个模块化单体服务，`Catalog / Baseline / Compare / Orchestrator / Incident` 是代码与数据边界，不要求立即拆成微服务。只有任务量、团队边界或扩缩容需求明确后再独立部署，避免过早引入分布式复杂度。
 
 ### 2.1 本地数据链路
 
@@ -120,9 +143,12 @@ http://127.0.0.1:8765
 - 公司账号登录与权限管理。
 - Agent 注册、版本检查、心跳和在线状态。
 - App、版本、构建和测试场景管理。
+- TestProfile、DeviceCohort、基线修订和回归策略管理。
 - Run 元数据和指标摘要接收。
 - 样本文件、HTML 报告和附件存储。
 - 版本对比和性能回归判断。
+- 自动化脚本制品、任务租约和执行记录管理。
+- 在线 Trigger 复算、异常切片聚合和问题闭环。
 - 使用统计和审计日志。
 - 自动化流水线结果查询和质量门禁。
 
@@ -150,7 +176,10 @@ http://127.0.0.1:8765
 | 测试记录   | App、版本、设备、场景、执行人、时间、状态          |
 | 报告详情   | 指标摘要、趋势、模块切片、原始报告下载             |
 | 版本对比   | 基线版本与候选版本的指标差值和回归结论             |
+| 基线策略   | 基线 revision、适用范围、审批、阈值和审计记录      |
+| 脚本管理   | ScriptProject、制品版本、Suite、运行环境和审批     |
 | 自动化任务 | 流水线、用例、模块、关联 Run 和执行状态            |
+| 性能问题   | Regression Finding、自动切片、附件和修复验证       |
 | 系统配置   | Agent 版本、指标阈值、数据保留策略、权限           |
 
 ## 4. 客户端分层
@@ -205,14 +234,19 @@ Application
   platform
   packageId / bundleId
 
-AppVersion
+ReleaseVersion
   id
   applicationId
   versionName
+
+Build
+  id
+  releaseVersionId
   versionCode
-  buildId
+  ciBuildId
   gitCommit
   branch
+  artifactDigest
   createdAt
 ```
 
@@ -222,7 +256,7 @@ AppVersion
 2. 从设备中已安装的 App 元数据读取。
 3. 用户手动补充。
 
-同一个 `versionName` 可能对应多个构建，因此版本比较主键不能只使用展示版本号，应同时保留 `versionCode` 或 `buildId`。
+同一个 `versionName` 可能对应多个构建，因此版本比较和基线必须引用不可变 `Build.id`，不能只使用展示版本号。`versionCode/ciBuildId/gitCommit/artifactDigest` 用于解析和追溯 Build。
 
 ### 5.2 Test Run
 
@@ -282,6 +316,125 @@ GPU：平均值、P90、峰值
 质量：样本数、缺失率、采集错误数
 ```
 
+### 5.5 版本、构建和发布通道
+
+`versionName` 是用户看到的业务版本，不能作为一次构建的唯一标识。建议把版本目录拆为以下层级：
+
+```text
+Project
+  `-- Application                 # Android/iOS App
+        `-- ReleaseVersion        # 3.12.0，业务版本
+              `-- Build           # 不可变构建实体
+                    |-- Android versionCode / iOS CFBundleVersion
+                    |-- CI buildId
+                    |-- gitCommit
+                    |-- branch
+                    |-- channel   # dev / staging / gray / production
+                    |-- artifactDigest
+                    `-- createdAt
+```
+
+约束如下：
+
+- `Application` 由 `projectId + platform + packageId` 唯一确定。
+- `ReleaseVersion` 允许包含多个 Build；重新打包必须产生新 Build，不能覆盖旧记录。
+- Build 一旦进入测试就不可修改，只允许补充展示信息；安装包使用 SHA-256 等摘要去重和追溯。
+- 从设备读取到的版本只能用于匹配 Build，匹配不到时创建 `unresolved build`，等待 CI 元数据或人工确认。
+- CI 显式传入的 `buildId/gitCommit/artifactDigest` 优先级高于设备推断值。
+
+### 5.6 场景、配置和可比性指纹
+
+版本对比的基本单位不是“两个版本”，而是相同测试契约下的两个 `RunGroup`。测试契约由三个带修订号的对象组成：
+
+```text
+TestScenario
+  id / revision / name / tags
+  前置条件、业务步骤、预期时长
+
+TestProfile
+  id / revision
+  warmupSeconds / cooldownSeconds / sampleIntervalMs
+  collectors / metrics / repeatCount / timeoutSeconds
+
+DeviceCohort
+  id / revision
+  platform / modelPatterns / osMajor / refreshRateHz
+  performanceTier / requiredCapabilities
+```
+
+Run 创建时固化一份 `comparisonFingerprint`，避免后来修改场景或配置导致历史数据含义漂移：
+
+```json
+{
+  "applicationId": "app-ios-hepsioyna",
+  "scenario": {"id": "enter-room", "revision": 4},
+  "testProfile": {"id": "release-perf", "revision": 2},
+  "deviceCohort": "iphone-pro-120hz",
+  "platform": "ios",
+  "osMajor": "27",
+  "refreshRateHz": 120,
+  "environment": "staging",
+  "collectorVersion": "ios-pymd3-v3",
+  "metricSchemaVersion": 2,
+  "analyzerVersions": {
+    "summary": "summary-v2",
+    "jank": "perfdog-display-frametime-v1"
+  }
+}
+```
+
+指纹字段分两类：
+
+- **硬条件**：App、平台、场景修订、关键采集源、指标算法。不同则 `not-comparable`。
+- **软条件**：设备同档但非同型号、补丁版本、轻微时长差异。允许展示，但降低可信等级并给出差异说明。
+
+### 5.7 RunGroup、重复运行和派生数据
+
+一次执行容易受到温度、网络和后台任务干扰。自动化版本比较应以 `RunGroup` 聚合多次 Run：
+
+```text
+RunGroup
+  id
+  buildId
+  scenarioRevision
+  testProfileRevision
+  comparisonFingerprintHash
+  expectedRuns
+  validRuns
+  aggregationStatus
+  aggregateSummary
+```
+
+建议默认执行 3 次，先按质量规则剔除无效 Run，再对有效 Run 的摘要取中位数。数据量足够时同时保存 P25/P75、MAD 或置信区间，避免只比较两个偶然样本。
+
+原始与派生数据必须分层：
+
+```text
+事实层：Run、Sample、Frame、Marker、设备环境快照、原始附件
+派生层：RunSummary、SegmentSummary、RunGroupSummary
+结论层：Comparison、RegressionFinding、Incident
+```
+
+派生记录必须保存 `analyzerVersion` 和输入摘要。算法升级时新建派生版本，不覆盖旧结论，从而支持重算、审计和新旧算法并行验证。
+
+### 5.8 环境快照和数据质量
+
+Run 开始与结束时采集环境快照，至少包括：
+
+- 电量、充电状态、低电量模式和可获得的热状态。
+- 前台 App、设备锁屏状态、网络类型和是否使用 VPN。
+- 屏幕刷新率、分辨率、横竖屏和采集源。
+- Agent、采集器、脚本制品和指标算法版本。
+- 采样间隔、丢样率、采集器重启次数和时间同步偏差。
+
+每个 Run 先经过 `QualityEvaluator`：
+
+```text
+valid / degraded / invalid
+```
+
+`invalid` Run 不进入基线或自动门禁；`degraded` Run 可以展示，但需要策略明确允许才能参与聚合。质量结论必须先于性能回归结论，避免把采集故障误判成 App 回归。
+
 ## 6. 版本管理与报告对比
 
 ### 6.1 可比较条件
@@ -331,6 +484,147 @@ FPS < 25 的时间占比增加 > 10%  -> failed
 ```text
 passed / warning / failed / invalid / not-comparable
 ```
+
+### 6.4 基线不是一个版本号
+
+基线应是一个不可变的、带适用范围和数据快照的实体，而不是在 ReleaseVersion 或 Build 上加 `isBaseline=true`：
+
+```text
+PerformanceBaseline
+  id
+  applicationId
+  name
+  scope                     # scenario + profile + device cohort + environment
+  revision
+  sourceBuildId
+  sourceRunGroupIds
+  aggregateSnapshot
+  comparisonFingerprintHash
+  analyzerVersions
+  status                    # draft / active / superseded / archived
+  effectiveFrom / effectiveTo
+  createdBy / approvedBy
+  reason / auditLogId
+```
+
+这样设计可以同时支持：
+
+- 同一个稳定版本针对不同场景、设备档位维护不同基线。
+- 基线使用稳定版本的多次 Run 聚合，而不是任选一次报告。
+- 修复算法后生成新的基线 revision，旧报告仍能解释当时使用的基线。
+- 灰度、正式、专项测试使用不同基线，不互相污染。
+
+基线和阈值策略必须分离：基线描述“历史表现是什么”，`RegressionPolicy` 描述“允许变化多少”。更换阈值不应重写基线，更换基线也不应静默改变历史 Comparison。
+
+### 6.5 基线生命周期
+
+```mermaid
+stateDiagram-v2
+    [*] --> Draft
+    Draft --> Active: 审批并满足最小样本数
+    Draft --> Archived: 放弃
+    Active --> Superseded: 新修订激活
+    Superseded --> Archived: 超过保留期
+    Active --> Active: 仅修改展示信息
+```
+
+建议规则：
+
+1. 手工创建或由最近稳定 Build 推荐为 `draft`。
+2. 至少包含策略要求的有效 Run 数，例如同设备档位 3 次。
+3. 系统展示波动度、异常值和环境差异，由项目管理员审批为 `active`。
+4. 新基线激活时旧基线进入 `superseded`，已生成的 Comparison 继续引用旧 baseline revision。
+5. 自动滚动基线只能生成候选修订，默认不能跳过审批；低风险内部项目可配置自动审批。
+6. 被判定为回归的候选 Build 不能自动成为新基线，防止性能逐版本劣化。
+
+### 6.6 基线选择优先级
+
+候选 RunGroup 发起对比时，按以下顺序选择基线：
+
+1. CI/用户显式指定的 `baselineId + revision`。
+2. 完全匹配 App、场景修订、TestProfile、DeviceCohort 和环境的 active 基线。
+3. 匹配同场景和兼容设备档位的 active 基线，但结论降级并提示差异。
+4. 找不到时返回 `baseline-missing`，允许展示当前结果但不执行门禁。
+
+选择结果必须固化到 Comparison，不能因为后来激活了新基线而改变已有流水线结论。
+
+### 6.7 对比引擎流水线
+
+```mermaid
+flowchart LR
+    Candidate[候选 RunGroup] --> Quality[质量过滤]
+    Baseline[Baseline Revision] --> Compatibility[可比性检查]
+    Quality --> Compatibility
+    Compatibility --> Aggregate[聚合与归一化]
+    Aggregate --> Rules[规则计算]
+    Rules --> Findings[Regression Findings]
+    Findings --> Verdict[质量门禁结论]
+    Findings --> Incident[异常切片关联]
+```
+
+计算步骤：
+
+1. 过滤 `invalid` Run，检查有效重复次数。
+2. 比较完整 fingerprint，生成硬差异和软差异列表。
+3. 对每个指标确定方向、单位、聚合函数和缺失策略。
+4. 同时计算绝对差、相对差和波动度；分母接近 0 时禁用相对差。
+5. 对模块/Marker 区间分别计算，不能只比较整段平均值。
+6. 应用 `RegressionPolicyRevision`，生成结构化 Finding。
+7. 汇总门禁结论，保存完整输入引用和算法版本。
+
+单个 Finding 示例：
+
+```json
+{
+  "metric": "cpu.p95",
+  "segment": "enter_room",
+  "direction": "lower_is_better",
+  "baselineValue": 41.2,
+  "candidateValue": 52.8,
+  "absoluteDelta": 11.6,
+  "relativeDeltaPct": 28.16,
+  "threshold": {"warningPct": 15, "failedPct": 25},
+  "severity": "failed",
+  "confidence": "high",
+  "baselineRevision": 3,
+  "policyRevision": 5
+}
+```
+
+### 6.8 规则、噪声和最终结论
+
+`RegressionPolicy` 支持项目默认、App、场景和指标四级覆盖，越具体优先级越高。规则至少支持：
+
+```text
+relative_delta / absolute_delta / upper_limit / lower_limit
+duration_ratio / occurrence_count / missing_rate
+```
+
+建议增加以下抗噪策略：
+
+- 同时满足最小绝对差和最小相对差，过滤小数值抖动。
+- 候选差值没有超过基线历史波动带时降低置信度。
+- 只有一个有效 Run 时允许人工对比，但默认不阻断 CI。
+- 同一次任务出现多个相关指标异常时合并为一个问题，例如 FPS 下降与 Jank 增加。
+- `failed`、`warning` 与“统计可信度低”分别表达，不把不确定性伪装成通过。
+
+最终状态优先级：
+
+```text
+invalid > not-comparable > failed > warning > passed
+```
+
+其中 `baseline-missing` 单独记录，是否阻断流水线由项目策略决定。
+
+### 6.9 横向对比视图
+
+后台提供三种视图：
+
+1. **Build 对比**：候选 Build 对一个固定 baseline revision。
+2. **版本矩阵**：多个 ReleaseVersion/Build 按时间横向展示趋势。
+3. **场景下钻**：同一指标按 Marker 区间、设备档位和重复轮次查看分布。
+
+页面必须同时显示基线值、候选值、绝对差、相对差、阈值、可信度、样本数和环境差异。不能只显示红绿颜色，也不能在条件不一致时给出“回归/通过”的强结论。
 
 ## 7. 自动化测试联动
 
@@ -441,6 +735,180 @@ PerfPilot.exe marker start --run RUN_ID --name login
 PerfPilot.exe marker end --run RUN_ID --name login --status passed
 PerfPilot.exe run stop --run RUN_ID
 ```
+
+### 7.5 脚本管理模型
+
+自动化脚本不能作为可编辑文本直接塞进 Job，也不能由中心平台转换成任意 Shell 下发。建议采用“脚本项目 + 不可变制品 + 固定 Runner Adapter”的模型：
+
+```text
+ScriptProject
+  id / projectId / name / framework / repository
+  `-- ScriptVersion
+        id / gitCommit / artifactDigest / manifest
+        dependencyLock / createdBy / approvedAt
+        `-- TestSuite
+              `-- TestCase
+
+RuntimeProfile
+  pythonVersion / frameworkVersion
+  dependencyImageOrLock / environmentVariables
+  requiredCapabilities / timeout / retryPolicy
+
+SecretRef
+  只保存密钥系统引用，不把明文写进脚本制品或 Run
+```
+
+脚本制品可以来自 Git Commit、CI 生成的 ZIP/Wheel，或内部制品库。服务端保存摘要、Manifest 和签名；执行时按 digest 下载和校验，同一个 `ScriptVersion` 永远指向同一份内容。
+
+Manifest 示例：
+
+```yaml
+schemaVersion: 1
+framework: pytest-appium
+entrypoint: tests/performance
+suites:
+  - id: room-regression
+    cases:
+      - test_login
+      - test_enter_room
+requiredCapabilities:
+  - android
+timeoutSeconds: 1800
+markerMode: sdk
+```
+
+### 7.6 Automation Runner 边界
+
+自动化执行与性能采集权限不同，建议在客户端内部保持逻辑隔离：
+
+```text
+PerfPilot Agent
+  设备、Run、Collector、Marker、Artifact、上传
+
+PerfPilot Automation Runner
+  Job 租约、脚本下载校验、隔离工作目录、框架适配、超时终止
+  |-- PytestAdapter
+  |-- AppiumAdapter
+  `-- AirtestAdapter
+```
+
+首期可以同进程不同模块，接口稳定后再拆为子进程。Runner 只能调用 Agent 的结构化本地 API，不直接写 `runs/`，也不能绕过设备锁启动第二个采集器。
+
+安全约束：
+
+- 只有已审批、已签名且摘要匹配的脚本制品可以由远程任务执行。
+- Runner 使用固定参数数组启动白名单解释器/框架，不拼接命令字符串。
+- 每次执行使用独立工作目录和受控环境变量；结束后按保留策略清理。
+- Token、账号等通过 `SecretRef` 在执行时注入，日志必须脱敏。
+- 为脚本设置 CPU、内存、磁盘、超时和子进程数量限制；Windows 首期可使用 Job Object，后续可接容器化执行机。
+
+### 7.7 自动化任务和状态机
+
+```text
+AutomationJob
+  id / projectId / buildId
+  scriptVersionId / suiteId
+  scenarioIds / testProfileRevision
+  targetDeviceSelector
+  baselineSelector / policyRevision
+  priority / scheduledAt / createdBy
+
+AutomationAttempt
+  id / jobId / attemptNo / agentId / deviceId
+  leaseToken / status / timestamps
+  runGroupIds / errorCategory / artifactManifest
+```
+
+状态机：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued
+    Queued --> Leased: Agent 能力匹配并领取
+    Leased --> Preparing: 校验制品和设备
+    Preparing --> Running: 创建 RunGroup 并开始采集
+    Running --> Analyzing: 脚本完成并停止采集
+    Analyzing --> Uploading: 摘要、切片、附件生成
+    Uploading --> Completed
+    Queued --> Canceled
+    Leased --> Queued: 租约超时
+    Preparing --> Failed
+    Running --> Failed
+    Analyzing --> Failed
+    Uploading --> UploadPending: 网络不可用
+    UploadPending --> Completed: 重试成功
+```
+
+服务端使用短期租约而不是永久分配。Agent 崩溃或断网后租约过期，Job 根据幂等键和重试策略重新排队；同一个 Attempt 不得重复创建 RunGroup。
+
+### 7.8 一次任务的执行顺序
+
+```mermaid
+sequenceDiagram
+    participant CI
+    participant Server
+    participant Runner
+    participant Agent
+    participant App
+
+    CI->>Server: 创建 Job(buildId, suite, policy)
+    Runner->>Server: 领取匹配设备的租约
+    Runner->>Runner: 下载并校验脚本制品
+    Runner->>Agent: 预检设备与采集能力
+    Runner->>Agent: 创建 RunGroup / 第 N 次 Run
+    Runner->>Agent: start(warmup)
+    Runner->>App: 执行自动化步骤
+    Runner->>Agent: marker start/end/checkpoint
+    Agent->>Agent: 在线异常检测与切片触发
+    Runner->>Agent: stop(cooldown)
+    Runner->>Server: 上传 Attempt 和 RunGroup
+    Server->>Server: 质量评估、基线选择、版本对比
+    Server-->>CI: passed/warning/failed/not-comparable
+```
+
+失败分类至少区分：脚本断言失败、设备离线、App 崩溃、采集器失败、环境准备失败、上传失败和性能门禁失败。脚本功能失败不应被误写成性能回归，但本次性能数据和异常切片仍可保留用于诊断。
+
+### 7.9 Marker 契约
+
+当前 `scene/scriptFn` 可兼容保留，但目标协议应使用成对事件和稳定 ID：
+
+```json
+{
+  "markerId": "mk-01K...",
+  "parentMarkerId": null,
+  "scenarioId": "room-regression",
+  "caseId": "test_enter_room",
+  "stepId": "enter-room",
+  "name": "进入房间",
+  "event": "start",
+  "status": null,
+  "timestampMs": 1788748982300,
+  "attributes": {"attempt": 1}
+}
+```
+
+规则：
+
+- `start/end` 使用同一个 `markerId`，允许父子嵌套但不允许区间交叉。
+- Agent 记录接收时间和调用方时间；偏差超过阈值时以 Agent 时间为准并标记质量降级。
+- 脚本异常退出时 Agent 自动关闭未结束 Marker，状态设为 `aborted`。
+- 报告切片使用 Marker 区间，不再依赖“后续样本继承最后一个 scene”的隐式语义。
+
+### 7.10 调度和设备选择
+
+Job 使用能力选择器而不是固定 UDID：
+
+```json
+{
+  "platform": "android",
+  "deviceCohort": "android-high-120hz",
+  "osMajor": [14, 15],
+  "requiredCapabilities": ["fps", "app_cpu", "memory", "frame_time"],
+  "labels": ["lab-shanghai"]
+}
+```
+
+调度器只选择空闲且心跳正常的 Agent/设备。设备锁从“单个 Run”提升为带租约的资源锁，覆盖安装 App、预热、重复运行和清理全过程，避免其他手工测试插入同一设备。
 
 ## 8. 中心通信协议
 
@@ -574,6 +1042,8 @@ POST /api/v1/runs/{id}/stop
 GET  /api/v1/runs/{id}
 GET  /api/v1/runs/{id}/stream
 GET  /api/v1/runs/{id}/report
+GET  /api/v1/runs/{id}/incidents
+POST /api/v1/automation/attempts/{id}/heartbeat
 ```
 
 ### 中心平台 API
@@ -587,11 +1057,31 @@ POST /api/v1/runs/{id}/artifacts
 GET  /api/v1/runs
 GET  /api/v1/runs/{id}
 POST /api/v1/comparisons
+GET  /api/v1/comparisons/{id}
 GET  /api/v1/applications/{id}/versions
+POST /api/v1/applications/{id}/builds
+GET  /api/v1/applications/{id}/baselines
+POST /api/v1/baselines
+POST /api/v1/baselines/{id}/revisions
+POST /api/v1/baselines/{id}/activate
+GET  /api/v1/regression-policies/{id}
+POST /api/v1/script-projects/{id}/versions
+POST /api/v1/automation/jobs
+POST /api/v1/automation/jobs/lease
+POST /api/v1/automation/attempts/{id}/complete
+GET  /api/v1/incidents
+GET  /api/v1/incidents/{id}/artifacts
 GET  /api/v1/usage/summary
 ```
 
 本地 API 与中心 API 使用独立命名空间和认证策略，避免客户端内部接口被误当成公网接口。
+
+所有写接口需要支持：
+
+- `Idempotency-Key`，应对 Agent 和 CI 重试。
+- 乐观锁或 `revision`，防止基线、策略和脚本版本并发覆盖。
+- 审计上下文，包括用户、Agent、Job、来源 IP 和变更原因。
+- 分页、时间范围和项目范围，避免版本趋势查询退化为全表扫描。
 
 ## 12. 分阶段实施
 
@@ -621,10 +1111,12 @@ GET  /api/v1/usage/summary
 目标：识别版本性能变化。
 
 - App、版本、构建和场景模型。
+- RunGroup、TestProfile、DeviceCohort 和可比性指纹。
 - 自动读取 App 版本信息。
 - 可比较条件检查。
 - 双版本报告、模块对比和回归阈值。
-- 基线版本管理和回归通知。
+- 不可变基线 revision、审批、策略版本和回归通知。
+- 候选 Build 对固定基线的 CI 质量门禁。
 
 ### Phase 4：自动化联动
 
@@ -634,7 +1126,20 @@ GET  /api/v1/usage/summary
 - Marker 协议和模块切片。
 - Python SDK 和通用 CLI。
 - Appium、pytest、Airtest 集成示例。
-- CI 质量门禁和自动化任务关联。
+- ScriptProject、不可变 ScriptVersion 和 Runner Adapter。
+- Job 租约、设备能力调度、重复运行和自动化任务关联。
+- 脚本签名校验、SecretRef、资源限制和审计。
+
+### Phase 5：在线异常检测与问题切片
+
+目标：性能问题出现时自动保留可诊断上下文并形成问题闭环。
+
+- 本地环形缓冲、Trigger Engine 和 pre/post-roll 切片。
+- 基于规则的在线检测与服务端权威复算。
+- Incident、RegressionFinding、Marker 和切片关联。
+- 样本、逐帧、日志、环境快照和可选屏幕录制附件。
+- 去抖、合并、限流、隐私和存储预算。
+- 与缺陷平台、IM 通知和 CI 门禁联动。
 
 ## 13. 扩展指标模块
 
@@ -657,13 +1162,13 @@ GET  /api/v1/usage/summary
 
 字段定义：
 
-| 字段 | 可选值 | 含义 |
-| --- | --- | --- |
-| `unit` | `bytes`、`bytes_per_second`、`percent`、`energy_cost` 等 | 数值单位，禁止依赖字段名猜测 |
-| `scope` | `process`、`device`、`system`、`engine` | 数据属于 App、设备、系统还是 App/引擎埋点 |
-| `quality` | `measured`、`estimated`、`inferred` | 实测、系统估算或推导值 |
-| `source` | 平台接口标识 | 具体采集来源，便于排查设备差异 |
-| `availability` | `available`、`degraded`、`unavailable` | 当前设备是否提供该指标 |
+| 字段             | 可选值                                                           | 含义                                      |
+| ---------------- | ---------------------------------------------------------------- | ----------------------------------------- |
+| `unit`         | `bytes`、`bytes_per_second`、`percent`、`energy_cost` 等 | 数值单位，禁止依赖字段名猜测              |
+| `scope`        | `process`、`device`、`system`、`engine`                  | 数据属于 App、设备、系统还是 App/引擎埋点 |
+| `quality`      | `measured`、`estimated`、`inferred`                        | 实测、系统估算或推导值                    |
+| `source`       | 平台接口标识                                                     | 具体采集来源，便于排查设备差异            |
+| `availability` | `available`、`degraded`、`unavailable`                     | 当前设备是否提供该指标                    |
 
 报告和后台必须显示这些信息。例如：
 
@@ -822,15 +1327,15 @@ Xcode Energy Statistics/DVT 路径可能返回 CPU、GPU、网络、显示等能
 
 ### 13.5 平台能力矩阵
 
-| 指标 | Android | iOS | 第一阶段策略 |
-| --- | --- | --- | --- |
-| GPU 利用率 | 部分可用 | 部分可用 | 支持时显示来源和能力状态 |
-| Graphics/GL/EGL 内存 | 可尝试 | 设备相关 | 作为估算值，不承诺统一含义 |
-| 精确 VBO | 不通用 | 不通用 | 由 App/引擎埋点提供 |
-| App 网络流量 | 可正式支持 | 实验性 | Android 优先，iOS 先降级或不可用 |
-| 设备网络流量 | 可支持 | 可支持 | 明确标注 `scope: device` |
-| App 能耗估算 | 可支持 | 实验性 | 使用 `energy_cost`，不承诺 mAh |
-| 真实 App 电荷 | 不通用 | 不通用 | 需要外部硬件测量 |
+| 指标                 | Android    | iOS      | 第一阶段策略                     |
+| -------------------- | ---------- | -------- | -------------------------------- |
+| GPU 利用率           | 部分可用   | 部分可用 | 支持时显示来源和能力状态         |
+| Graphics/GL/EGL 内存 | 可尝试     | 设备相关 | 作为估算值，不承诺统一含义       |
+| 精确 VBO             | 不通用     | 不通用   | 由 App/引擎埋点提供              |
+| App 网络流量         | 可正式支持 | 实验性   | Android 优先，iOS 先降级或不可用 |
+| 设备网络流量         | 可支持     | 可支持   | 明确标注`scope: device`        |
+| App 能耗估算         | 可支持     | 实验性   | 使用`energy_cost`，不承诺 mAh  |
+| 真实 App 电荷        | 不通用     | 不通用   | 需要外部硬件测量                 |
 
 ### 13.6 版本对比和自动化报告
 
@@ -965,6 +1470,12 @@ Jank 版本对比只有在以下条件一致或明确可校准时才自动判定
 6. 采集输出改为 JSON Lines，展示层不再依赖控制台正则。
 7. Android 与 iOS 输出相同的标准指标名称和单位。
 8. 上传以 `runId` 幂等，中心不可用不影响本地测试。
+9. `ReleaseVersion` 与不可变 `Build` 分离，保存 `buildId/gitCommit/artifactDigest`。
+10. 场景、采集配置、设备分组和算法均带 revision，并固化到 Run 指纹。
+11. Marker 使用稳定 ID 和成对区间，兼容现有 `scene/scriptFn` 但不继续扩展隐式模型。
+12. 原始事件、派生摘要、Comparison 和 Incident 分层存储，任何结论可追溯到输入。
+13. 本地保留有限环形缓冲接口，为后续异常 pre-roll 切片预留但不默认录屏。
+14. 自动化脚本以不可变制品和摘要标识，不在任务请求中传任意脚本文本或 Shell。
 
 这些能力决定后续功能能否增量开发，而不需要重写现有采集器。
 
@@ -980,19 +1491,348 @@ Jank 版本对比只有在以下条件一致或明确可校准时才自动判定
 | 报告         | HTML 作为展示产物             | 不将 HTML 当作唯一数据源             |
 | 自动化集成   | 本地 HTTP API + SDK/CLI       | 不耦合具体自动化框架                 |
 | 版本主键     | version + buildId/versionCode | 同版本号可能存在多个构建             |
+| 基线模型     | 带 scope 的不可变 revision    | 防止新基线改变历史报告               |
+| 对比单位     | RunGroup 对 Baseline snapshot | 降低单次运行噪声                     |
+| 脚本管理     | 签名制品 + Runner Adapter     | 可复现、可审计且避免任意命令下发     |
+| 异常记录     | 环形缓冲 + 规则触发切片       | 保留问题前后上下文并控制存储成本     |
 | 安全边界     | 固定动作，不下发 Shell        | 防止中心平台演变成远程命令执行器     |
 | 客户端发布   | 签名安装包 + 自动更新         | 不暴露源码，降低使用门槛             |
 
 ## 16. 推荐的下一步
 
-当前项目应先进入 Phase 1，优先顺序如下：
+当前项目已经具备 Phase 1 的主体：本地 Agent、Run、结构化 samples、marker、HTML 报告和 Windows 便携包。下一阶段不应直接先做复杂管理页面，而应按以下顺序补齐数据契约：
 
-1. 定义 `Run`、`Sample`、`Marker` 三个 JSON Schema。
-2. 将 Android/iOS 采集输出统一为 JSON Lines。
-3. 让本地 Web Agent 直接消费结构化事件。
-4. 同时生成结构化数据和现有 HTML 报告。
-5. 增加桌面启动器和打包资源路径适配。
-6. 生成 Windows x64 安装包，在两台干净电脑上验证 Android/iOS。
-7. 再建设 Phase 2 中心后台，接入使用统计和报告上传。
+1. 正式定义并校验 `Run / Sample / Marker / Frame / ArtifactManifest` JSON Schema。
+2. 将 Run 元数据升级为 schema v2，加入 `build`、`scenarioRevision`、`testProfileRevision`、环境快照和 analyzer versions；继续兼容读取 v1。
+3. 把当前单值 `scene/scriptFn` marker 升级为成对区间，同时保留兼容字段。
+4. 扩展 `summary.py` 为可注册 Analyzer，生成 RunSummary 和 SegmentSummary，并记录算法版本。
+5. 在本地先实现 Build 目录、RunGroup 和两组报告对比，验证可比性规则，不依赖中心服务。
+6. 建设最小中心平台：Application/Build/Run 上传、对象存储、基线 revision、Comparison API。
+7. 选择 1 个 App、2 个稳定场景、1 个设备档位进行基线试点，先积累真实波动数据再确定阈值。
+8. 接入一个 pytest/Appium 示例 Runner，跑通签名脚本制品、Marker、重复运行和 CI 回传。
+9. 最后引入在线异常 Trigger 与切片；默认先保存指标、帧和日志，屏幕录制需单独审批。
 
-这样既能尽快让公司其他人使用，也能为版本对比和自动化联动保留稳定的数据基础。
+该顺序先固定数据语义，再做平台和自动化，能避免 UI、脚本平台和对比算法各自形成不兼容的数据模型。
+
+## 17. 性能异常检测与自动切片
+
+### 17.1 切片的定义
+
+“自动切片”默认指从同一个持续 Run 中截取问题前后的一段结构化上下文，不等同于自动录屏：
+
+```text
+Metric Slice（默认）
+  samples / frames / markers / logs / environment snapshots
+
+Visual Slice（可选）
+  screenshot / screen recording / trace
+```
+
+Metric Slice 成本低、隐私风险较小，应默认开启。Visual Slice 可能包含账号、聊天和用户内容，只能按项目白名单、测试账号和明确保留策略开启。
+
+### 17.2 两级检测架构
+
+```mermaid
+flowchart LR
+    Samples[实时 Sample/Frame] --> Local[Agent Trigger Engine]
+    Local --> Buffer[环形缓冲]
+    Local --> Slice[本地快速切片]
+    Slice --> Upload[Artifact 上传]
+    Upload --> Server[服务端 Analyzer]
+    Baseline[Baseline + Policy] --> Server
+    Server --> Finding[Regression Finding]
+    Finding --> Incident[Incident 聚合]
+```
+
+- **Agent 在线检测**：轻量、低延迟，目标是及时保留上下文；允许产生少量误报。
+- **服务端权威检测**：使用完整 Run、基线、多轮聚合和版本化算法，决定最终回归结论。
+
+客户端不能因为在线规则未命中就丢弃原始 Run；服务端也不能把在线 Trigger 直接当作最终性能失败。
+
+### 17.3 环形缓冲和 pre/post-roll
+
+Agent 为每个活跃 Run 维护有容量上限的环形缓冲：
+
+```text
+sample buffer：最近 60 秒
+frame buffer：最近 30 秒或固定最大事件数
+log buffer：最近 2,000 行，先脱敏
+marker buffer：当前 Run 全量，数量受保护上限约束
+environment buffer：状态变化事件
+```
+
+当规则在 `T` 时刻触发：
+
+```text
+sliceStart = T - preRollSeconds
+sliceEnd   = T + postRollSeconds
+```
+
+建议默认 `preRoll=15s`、`postRoll=20s`。post-roll 期间继续收集，不阻塞原 Run；多个重叠 Trigger 合并为一个 Slice，合并窗口和最大长度由策略控制。
+
+为了避免重复存储，完整 Run 本地仍存在时，Slice Manifest 可以先引用原始文件的时间范围；上传或本地 Run 即将清理时再物化为独立压缩附件。
+
+### 17.4 Trigger 规则
+
+第一阶段使用可解释的规则检测，不急于引入黑盒模型：
+
+```text
+threshold：CPU P95、内存、FrameTime 等超过固定值
+relative_to_baseline：相对基线偏离超过阈值
+consecutive_windows：连续 N 个窗口异常
+duration：异常累计持续超过指定时间
+slope：内存或资源使用持续增长
+event_correlation：崩溃、ANR、错误日志与性能异常同时出现
+```
+
+规则示例：
+
+```json
+{
+  "id": "fps-drop-room-v3",
+  "metric": "fps",
+  "scope": "marker:enter-room",
+  "condition": "value < 25",
+  "windowSeconds": 5,
+  "requiredWindows": 3,
+  "severity": "high",
+  "preRollSeconds": 15,
+  "postRollSeconds": 20,
+  "cooldownSeconds": 60,
+  "maxSlicesPerRun": 3,
+  "attachments": ["samples", "frames", "markers", "logs", "environment"]
+}
+```
+
+每条 Trigger 必须记录 rule revision、当前值、阈值、连续窗口、数据来源和质量。规则缺少所需指标时标记 `not-evaluated`，不能按 0 参与判断。
+
+### 17.5 去抖、合并和限流
+
+没有控制的自动切片会迅速耗尽磁盘和对象存储。Trigger Engine 必须实现：
+
+- `debounce`：瞬时单点异常不立即触发。
+- `cooldown`：同规则在冷却期内不重复创建切片。
+- `merge`：时间重叠且根因类别相近的 Trigger 合并。
+- `budget`：每个 Run 的切片数、附件总大小和录屏时长上限。
+- `priority`：磁盘紧张时保留 crash/ANR/high，优先丢弃重复 low。
+- `backpressure`：上传阻塞时降低非必要附件级别，但不影响采集主链路。
+
+### 17.6 Incident 和附件模型
+
+```text
+Incident
+  id / projectId / applicationId / buildId
+  runId / runGroupId / comparisonId
+  type / severity / status
+  title / fingerprint
+  firstSeenAt / lastSeenAt / occurrenceCount
+  owner / linkedIssue / resolution
+  `-- TriggerEvent[]
+  `-- ArtifactRef[]
+  `-- RegressionFinding[]
+```
+
+同类问题通过稳定 fingerprint 聚合，例如：
+
+```text
+application + scenario + marker + metric + rule + stack/log signature
+```
+
+Slice 目录建议：
+
+```text
+runs/{runId}/incidents/{incidentLocalId}/
+  manifest.json
+  samples.jsonl
+  frames.jsonl
+  markers.jsonl
+  logs.txt
+  environment.json
+  screenshot.png          # 可选
+  screen.mp4              # 可选
+  trace.perfetto-trace    # 可选
+```
+
+`manifest.json` 包含时间范围、触发原因、文件摘要、脱敏状态、是否完整、丢失附件和上传状态。所有附件使用内容摘要校验，服务端按 `runId + incidentLocalId` 幂等接收。
+
+### 17.7 问题闭环
+
+```text
+detected -> confirmed / false-positive -> assigned -> resolved -> verified -> closed
+```
+
+- 自动 Finding 首先进入 `detected`，服务端复算后可转为 `confirmed`。
+- 相同 fingerprint 在后续 Build 再次出现时增加 occurrence，不重复创建大量问题。
+- 修复 Build 对相同场景运行后自动关联验证结果。
+- `false-positive` 必须保留原因，可用于调整规则但不能删除历史记录。
+- 后续可对接 Jira、禅道、飞书或 Slack，但外部 Issue ID 只是关联，不是唯一事实源。
+
+## 18. 目标模块边界与代码演进
+
+### 18.1 客户端目标目录
+
+在保留现有采集器的前提下，建议逐步演进为：
+
+```text
+perfpilot/
+  agent/
+    api/                 # localhost API、认证、SSE
+    runs/                # Run/RunGroup 生命周期和设备锁
+    devices/             # 设备与 App 元数据
+    upload/              # 离线队列和幂等上传
+  collectors/
+    android/
+    ios/
+    protocol.py          # Collector JSONL 协议
+  domain/
+    models.py            # Run/Build/Marker/Artifact DTO
+    schemas/             # JSON Schema 与迁移
+    quality.py           # 本地质量预检
+  analyzers/
+    summary.py
+    segments.py
+    frame_time.py
+    triggers.py
+  incidents/
+    buffer.py
+    slicer.py
+    manifest.py
+  automation/
+    runner.py
+    lease.py
+    adapters/
+      pytest.py
+      appium.py
+      airtest.py
+  storage/
+    run_store.py
+    artifact_store.py
+    migrations.py
+```
+
+这不是一次性重构要求。现有模块的迁移映射：
+
+| 当前模块          | 首步演进                                   | 后续目标                   |
+| ----------------- | ------------------------------------------ | -------------------------- |
+| `session.py`    | 提取 Run 状态和设备锁                      | `agent/runs`             |
+| `store.py`      | 增加 schema migration 和 artifact manifest | `storage`                |
+| `events.py`     | 定义 Marker/Frame/Incident 事件            | `domain/schemas`         |
+| `summary.py`    | Analyzer 接口和 analyzerVersion            | `analyzers`              |
+| `collectors.py` | JSONL 协议替代文本正则                     | `collectors/protocol.py` |
+| `server.py`     | 路由与业务服务分离                         | `agent/api`              |
+| `report.py`     | 只消费派生模型，不自行计算                 | 展示适配器                 |
+
+### 18.2 中心平台模块化单体
+
+```text
+server/
+  identity/              # SSO、项目权限、Agent 凭证
+  catalog/               # App、ReleaseVersion、Build、Scenario
+  ingestion/             # Run/Artifact 幂等接收
+  baseline/              # baseline revision 和审批
+  comparison/            # 聚合、可比性、规则、门禁
+  automation/            # ScriptVersion、Job、Lease、Attempt
+  incidents/             # Trigger、Slice、问题聚合和通知
+  query/                 # 报告、趋势和管理后台读模型
+```
+
+模块之间通过应用服务接口和领域事件协作。首期使用同一 PostgreSQL，但每个模块拥有自己的表和迁移；对象存储只保存大文件，数据库保存可查询元数据、摘要、引用和校验值。
+
+### 18.3 核心异步事件
+
+中心平台内部建议定义以下领域事件：
+
+```text
+RunUploaded
+RunQualityEvaluated
+RunGroupReady
+BaselineActivated
+ComparisonCompleted
+RegressionDetected
+IncidentCreated
+AutomationAttemptCompleted
+ArtifactUploaded
+```
+
+初期可使用数据库 Outbox + 后台 Worker，不必立即引入 Kafka。事件处理必须幂等；需要可靠异步后再接 Redis/RabbitMQ/Kafka，领域事件语义保持不变。
+
+### 18.4 存储和索引
+
+PostgreSQL 保存：
+
+- Application、Build、Scenario、Profile、Cohort。
+- Run/RunGroup 元数据、Summary、Quality。
+- Baseline、Policy、Comparison、Finding。
+- Script、Job、Attempt、Incident、ArtifactRef 和审计日志。
+
+对象存储保存：
+
+- `samples.jsonl.zst`、`frames.jsonl.zst`、HTML 报告。
+- 自动化日志、截图、录屏、Perfetto/Instruments trace。
+- 签名脚本制品和依赖清单。
+
+推荐对象键：
+
+```text
+projects/{projectId}/apps/{applicationId}/runs/{yyyy}/{mm}/{runId}/{artifactName}
+```
+
+数据库常用复合索引至少覆盖：
+
+```text
+(project_id, application_id, started_at)
+(application_id, build_id, scenario_revision)
+(fingerprint_hash, status, started_at)
+(job_id, attempt_no)
+(incident_fingerprint, last_seen_at)
+```
+
+## 19. 非功能要求与验收标准
+
+### 19.1 可靠性
+
+- Agent 或浏览器关闭不应损坏已写入的 JSONL；元数据使用临时文件 + 原子替换。
+- 中心断网不影响本地 Run，上传恢复后按幂等键续传。
+- Job 租约过期可恢复，但一个物理设备同时只能有一个占用者。
+- Analyzer、Comparison 和通知 Worker 可重复执行，结果不重复。
+
+### 19.2 性能和容量
+
+- 实时采集、SSE 和在线 Trigger 不得显著改变被测 App 指标；需要记录 Agent 自身资源占用。
+- 原始样本流式写入，不能在长 Run 中无限保存在内存；当前 `session["samples"]` 后续应改为有限实时窗口。
+- 管理后台趋势查询读取摘要表，不在线扫描对象存储中的 JSONL。
+- 切片、日志和录屏分别设置项目级配额和生命周期。
+
+### 19.3 可观测性
+
+平台自身至少暴露：
+
+```text
+run success rate / collector failure rate / missing sample rate
+upload backlog / artifact upload latency
+job queue latency / lease timeout rate
+comparison latency / baseline missing rate
+trigger count / merged slice count / storage dropped count
+```
+
+日志统一包含 `projectId/runId/runGroupId/jobId/attemptId/agentId`，但不记录明文设备 UDID、Token 和业务账号密码。
+
+### 19.4 第一版版本基线 MVP 验收
+
+1. 一个 App 可登记多个不可变 Build，并能从本地 Run 正确关联 Build。
+2. 相同场景和设备条件下，可把至少 3 次有效 Run 建为 baseline revision。
+3. 候选 Build 的 3 次 Run 可生成聚合对比、环境差异和结构化 Findings。
+4. 基线更新后旧 Comparison 仍引用旧 revision，结果不改变。
+5. 指纹硬条件不一致时返回 `not-comparable`，不生成误导性红绿结论。
+6. CI 能获得稳定的 `passed/warning/failed/invalid/not-comparable` 状态。
+
+### 19.5 第一版自动化与切片 MVP 验收
+
+1. 一个已签名 ScriptVersion 可由匹配 Agent 领取并在隔离目录执行。
+2. Runner 能通过本地 API 完成 Run 启停和成对 Marker，脚本异常时自动收尾。
+3. 同一设备不会同时运行手工 Run 和自动化 Attempt。
+4. 连续 FPS/CPU/内存规则命中后生成包含 15 秒前、20 秒后的 Metric Slice。
+5. 同类重叠 Trigger 被合并，单 Run 不超过配置的切片数和存储预算。
+6. Incident 能关联 Build、Run、Marker、Finding 和附件，并支持后续 Build 验证。
+
+以上验收完成后，再考虑复杂统计模型、跨机房调度、自动录屏和微服务拆分。

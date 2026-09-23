@@ -25,7 +25,10 @@ def _tcp_open(host: str, port: int, timeout: float = 0.4) -> bool:
 def layout_ok() -> tuple[bool, str]:
     if not is_frozen():
         return True, "source"
-    internal = app_dir() / "_internal"
+    # On Windows one-dir builds keep data in ``app_dir/_internal``. macOS
+    # app bundles expose the matching PyInstaller data directory via
+    # ``sys._MEIPASS`` (resource_dir), not beside Contents/MacOS/PerfPilot.
+    internal = resource_dir()
     if not internal.is_dir():
         return False, "缺少 _internal 文件夹。请把 PerfPilot.exe 和 _internal 放在同一目录后再运行。"
     return True, str(internal)
@@ -76,7 +79,8 @@ def diagnose() -> dict[str, Any]:
     adb_usable, adb_version = _adb_probe(adb)
     modules = _module_probes()
     ios_runtime_ok = all(item["ok"] for item in modules.values())
-    portable_ready = ok and adb_path.is_file() and adb_usable and ios_runtime_ok and wintun.is_file()
+    needs_wintun = os.name == "nt"
+    portable_ready = ok and adb_path.is_file() and adb_usable and ios_runtime_ok and (not needs_wintun or wintun.is_file())
     try:
         importlib.import_module("sslpsk_pmd3")
         tcp_tunnel = {"ok": True, "error": None}
@@ -92,7 +96,7 @@ def diagnose() -> dict[str, Any]:
     if not ios_runtime_ok:
         missing = ", ".join(name for name, item in modules.items() if not item["ok"])
         hints.append(f"iOS 运行库不完整：{missing}")
-    if not wintun.is_file():
+    if needs_wintun and not wintun.is_file():
         hints.append("缺少 wintun.dll，iOS 17+ 无线隧道采集可能不可用。")
     if not usbmux:
         hints.append("未检测到 Apple USB 通道。连接 iPhone 前请安装 Apple Devices 或 iTunes，解锁并点「信任」。")

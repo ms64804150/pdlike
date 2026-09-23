@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import threading
+from pathlib import Path
 from typing import Any
 
 from .paths import IOS_TOOL, ROOT, TIDEVICE
@@ -37,7 +38,7 @@ def _run(command: list[str], timeout: int = 30) -> subprocess.CompletedProcess[s
         cwd = adb_cwd() or ROOT
     log.debug("exec %s cwd=%s timeout=%s", cmd, cwd, timeout)
     try:
-        env = adb_env() if str(cmd[0]).lower().endswith("adb.exe") else process_env()
+        env = adb_env() if Path(str(cmd[0])).name.lower() in ("adb", "adb.exe") else process_env()
     except Exception as error:
         log.exception("[Agent] env build failed cmd=%s err=%s", cmd[:4], error)
         env = minimal_child_env()

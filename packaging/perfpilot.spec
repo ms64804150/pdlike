@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 
 from PyInstaller.building.api import COLLECT, EXE, PYZ
+from PyInstaller.building.osx import BUNDLE
 from PyInstaller.building.build_main import Analysis
 
 try:
@@ -18,12 +19,15 @@ datas = [
     (str(ROOT / "web" / "app.js"), "web"),
     (str(ROOT / "web" / "styles.css"), "web"),
 ]
-platform_tools = ROOT / "vendor" / "platform-tools"
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
+platform_tools = ROOT / "vendor" / ("platform-tools-macos" if IS_MACOS else "platform-tools")
 if platform_tools.is_dir():
     # PerfPilot only invokes adb. The rest of platform-tools (fastboot,
     # sqlite3, filesystem utilities, etc.) adds several megabytes but is
     # never used at runtime.
-    for name in ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "NOTICE.txt"):
+    platform_tool_files = ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "NOTICE.txt") if IS_WINDOWS else ("adb", "NOTICE.txt")
+    for name in platform_tool_files:
         source = platform_tools / name
         if source.is_file():
             datas.append((str(source), "vendor/platform-tools"))
@@ -102,20 +106,21 @@ def _keep_x64_wintun(item: tuple[str, str]) -> bool:
     return "pytun_pmd3/wintun/bin/" not in destination or "/amd64" in destination
 
 
-datas = [item for item in datas if _keep_x64_wintun(item)]
-binaries = [item for item in binaries if _keep_x64_wintun(item)]
-
-wintun_dll = ROOT / "vendor" / "wintun" / "amd64" / "wintun.dll"
-if wintun_dll.is_file():
-    binaries.append((str(wintun_dll), "pytun_pmd3/wintun/bin/amd64"))
-venv_wintun = Path(sys.prefix) / "Lib" / "site-packages" / "pytun_pmd3" / "wintun" / "bin" / "amd64" / "wintun.dll"
-if venv_wintun.is_file() and venv_wintun.resolve() != wintun_dll.resolve():
-    binaries.append((str(venv_wintun), "pytun_pmd3/wintun/bin/amd64"))
+if IS_WINDOWS:
+    datas = [item for item in datas if _keep_x64_wintun(item)]
+    binaries = [item for item in binaries if _keep_x64_wintun(item)]
+    wintun_dll = ROOT / "vendor" / "wintun" / "amd64" / "wintun.dll"
+    if wintun_dll.is_file():
+        binaries.append((str(wintun_dll), "pytun_pmd3/wintun/bin/amd64"))
+    venv_wintun = Path(sys.prefix) / "Lib" / "site-packages" / "pytun_pmd3" / "wintun" / "bin" / "amd64" / "wintun.dll"
+    if venv_wintun.is_file() and venv_wintun.resolve() != wintun_dll.resolve():
+        binaries.append((str(venv_wintun), "pytun_pmd3/wintun/bin/amd64"))
 
 site_packages = Path(sys.prefix) / "Lib" / "site-packages"
-for pyd in site_packages.glob("*.pyd"):
-    if pyd.name.lower().startswith(("lzss", "lzfse")):
-        binaries.append((str(pyd), "."))
+if IS_WINDOWS:
+    for pyd in site_packages.glob("*.pyd"):
+        if pyd.name.lower().startswith(("lzss", "lzfse")):
+            binaries.append((str(pyd), "."))
 if collect_dynamic_libs is not None:
     for name in ("qh3", "sslpsk_pmd3", "Crypto"):
         try:
@@ -123,11 +128,12 @@ if collect_dynamic_libs is not None:
         except Exception:
             pass
 
-dll_dir = Path(sys.base_prefix) / "DLLs"
-for name in ("libssl-3-x64.dll", "libcrypto-3-x64.dll", "libssl-1_1-x64.dll", "libcrypto-1_1-x64.dll"):
-    candidate = dll_dir / name
-    if candidate.is_file():
-        binaries.append((str(candidate), "."))
+if IS_WINDOWS:
+    dll_dir = Path(sys.base_prefix) / "DLLs"
+    for name in ("libssl-3-x64.dll", "libcrypto-3-x64.dll", "libssl-1_1-x64.dll", "libcrypto-1_1-x64.dll"):
+        candidate = dll_dir / name
+        if candidate.is_file():
+            binaries.append((str(candidate), "."))
 
 a = Analysis(
     [str(ROOT / "launcher.py")],
@@ -160,6 +166,11 @@ a = Analysis(
     noarchive=False,
 )
 pyz = PYZ(a.pure)
+exe_options = {"console": True}
+if IS_WINDOWS:
+    # Preserve stdout/stderr for --doctor and collector pipes, but hide the
+    # console immediately when users launch the executable by double-click.
+    exe_options["hide_console"] = "hide-early"
 exe = EXE(
     pyz,
     a.scripts,
@@ -170,11 +181,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
-    # Preserve stdout/stderr for --doctor and collector pipes, but hide the
-    # console immediately when users launch the executable by double-click.
-    hide_console="hide-early",
     disable_windowed_traceback=False,
+    **exe_options,
 )
 coll = COLLECT(
     exe,
@@ -184,3 +192,15 @@ coll = COLLECT(
     upx=False,
     name="PerfPilot",
 )
+
+if IS_MACOS:
+    app = BUNDLE(
+        coll,
+        name="PerfPilot.app",
+        bundle_identifier="com.perfpilot.agent",
+        info_plist={
+            "CFBundleDisplayName": "PerfPilot",
+            "CFBundleShortVersionString": "1.0.0",
+            "NSHighResolutionCapable": True,
+        },
+    )

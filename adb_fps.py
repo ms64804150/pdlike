@@ -543,11 +543,18 @@ class ProcessMonitor:
             return None
 
     def _read_meminfo(self, package: str) -> MemInfo:
-        output = adb_shell(self.serial, "dumpsys", "meminfo", package)
+        try:
+            output = adb_shell(self.serial, "dumpsys", "meminfo", package, check=False)
+        except (OSError, subprocess.SubprocessError, RuntimeError, TimeoutError) as error:
+            print(
+                f"[AndroidSample] meminfo unavailable package={package} err={error}",
+                flush=True,
+            )
+            return MemInfo()
         parsed = parse_android_meminfo(output)
         if parsed.pss_mb is None:
             print(
-                f"[AndroidSample] meminfo parse miss package={package} bytes={len(output)}",
+                f"[AndroidSample] meminfo parse miss package={package} bytes={len(output)} preview={output[:160]!r}",
                 flush=True,
             )
         return parsed

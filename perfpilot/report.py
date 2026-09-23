@@ -451,6 +451,20 @@ def _inspect_script(payload: dict[str, Any]) -> str:
       applyInspect(nearestIndex(t0 + ((x - padL) / plotW) * tSpan), 'chart');
     });
   });
+    document.querySelectorAll('[data-chart-scale]').forEach(function (button) {
+        button.addEventListener('click', function () {
+            const card = button.closest('.chart-card');
+            if (!card) return;
+            const current = Number(card.dataset.chartScale) || 1;
+            const next = Math.max(1, Math.min(4, current + Number(button.dataset.chartScale)));
+            card.dataset.chartScale = String(next);
+            card.style.setProperty('--chart-scale', String(next));
+            const status = card.querySelector('.chart-scale-status');
+            if (status) status.textContent = next + 'x';
+            card.querySelector('[data-chart-scale="-1"]').disabled = next === 1;
+            card.querySelector('[data-chart-scale="1"]').disabled = next === 4;
+        });
+    });
   const table = document.querySelector('.table-wrap tbody');
   if (table) {
     table.addEventListener('click', function (event) {
@@ -976,13 +990,19 @@ h1{{font-size:28px;letter-spacing:-1px;margin:0 0 8px}}h2,h3{{margin:0}}
 .memory-chart{{grid-column:1/-1}}
 .chart-title{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}
 .chart-value{{font:500 11px var(--mono);color:var(--coral)}}
+.chart-actions{{display:flex;align-items:center;gap:5px;margin-top:8px}}
+.chart-scale-btn{{width:26px;height:24px;padding:0;border:1px solid var(--line);background:#fff;color:var(--ink);cursor:pointer;font:600 15px var(--mono);line-height:1}}
+.chart-scale-btn:hover:not(:disabled){{border-color:var(--green);color:#176342;background:#f2fbf5}}
+.chart-scale-btn:disabled{{opacity:.38;cursor:default}}
+.chart-scale-status{{min-width:23px;color:var(--muted);font:10px var(--mono);text-align:center}}
 .chart-axis-hint{{margin:6px 0 0;color:var(--muted);font:10px var(--mono)}}
 .chart-legend{{display:flex;flex-wrap:wrap;gap:10px 14px;margin-top:8px;font:500 10px var(--mono)}}
 .chart-legend .leg{{display:flex;align-items:center;gap:6px}}
 .chart-legend i{{width:10px;height:3px;border-radius:2px;display:inline-block}}
 .chart-legend .leg.avg{{color:#8a999b}}
 .chart-legend .leg.avg i{{height:0;width:14px;border-top:2px dashed currentColor;background:transparent;border-radius:0}}
-svg{{width:100%;margin-top:10px;cursor:crosshair}}
+.chart-viewport{{overflow-x:auto;overflow-y:hidden;margin-top:10px;padding-bottom:4px}}
+svg.report-chart{{width:max(100%,calc(720px * var(--chart-scale, 1)));margin:0;cursor:crosshair;display:block}}
 .empty{{color:var(--muted);padding:24px 0}}
 .timeline-inspect{{background:#fff;border:1px solid var(--line);box-shadow:var(--shadow);padding:16px 22px 18px;margin-bottom:17px}}
 .timeline-inspect[hidden]{{display:none!important}}
@@ -1039,18 +1059,15 @@ td.mono{{font-family:var(--mono);font-size:11px}}
   </div>
 </aside>
 <div class="chart-grid">
-<article class="chart-card"><div class="chart-title"><div><p class="eyebrow">FRAME PACING</p><h3>FPS 趋势</h3>
+<article class="chart-card" data-chart-scale="1"><div class="chart-title"><div><p class="eyebrow">FRAME PACING</p><h3>FPS 趋势</h3>
 {_legend([(FPS_COLOR, 'FPS')])}
-<p class="chart-axis-hint">纵轴：帧率 (FPS) · 横轴：时间 · 点击对齐该时刻</p></div>
-<span class="chart-value" id="chart-fps-label">{_fmt(last_fps)} FPS</span></div>{fps_svg}</article>
-<article class="chart-card"><div class="chart-title"><div><p class="eyebrow">RESOURCE LOAD</p><h3>CPU</h3>
+<p class="chart-axis-hint">纵轴：帧率 (FPS) · 横轴：时间 · 点击对齐该时刻</p></div><div><span class="chart-value" id="chart-fps-label">{_fmt(last_fps)} FPS</span><div class="chart-actions"><button type="button" class="chart-scale-btn" data-chart-scale="-1" title="缩小图表" aria-label="缩小图表" disabled>-</button><span class="chart-scale-status">1x</span><button type="button" class="chart-scale-btn" data-chart-scale="1" title="放大图表" aria-label="放大图表">+</button></div></div></div><div class="chart-viewport">{fps_svg}</div></article>
+<article class="chart-card" data-chart-scale="1"><div class="chart-title"><div><p class="eyebrow">RESOURCE LOAD</p><h3>CPU</h3>
 {_legend([(CPU_COLOR, 'App CPU')])}
-<p class="chart-axis-hint">纵轴：占用 (%) · 横轴：时间 · 点击对齐该时刻</p></div>
-<span class="chart-value" id="chart-cpu-label">{_fmt(last_cpu, '%')} CPU</span></div>{cpu_svg}</article>
-<article class="chart-card memory-chart"><div class="chart-title"><div><p class="eyebrow">PROCESS MEMORY</p><h3>Memory 趋势</h3>
+<p class="chart-axis-hint">纵轴：占用 (%) · 横轴：时间 · 点击对齐该时刻</p></div><div><span class="chart-value" id="chart-cpu-label">{_fmt(last_cpu, '%')} CPU</span><div class="chart-actions"><button type="button" class="chart-scale-btn" data-chart-scale="-1" title="缩小图表" aria-label="缩小图表" disabled>-</button><span class="chart-scale-status">1x</span><button type="button" class="chart-scale-btn" data-chart-scale="1" title="放大图表" aria-label="放大图表">+</button></div></div></div><div class="chart-viewport">{cpu_svg}</div></article>
+<article class="chart-card memory-chart" data-chart-scale="1"><div class="chart-title"><div><p class="eyebrow">PROCESS MEMORY</p><h3>Memory 趋势</h3>
 {_legend([(color, name) for name, color in mem_legend])}
-<p class="chart-axis-hint">纵轴：内存 (MB) · 横轴：时间 · 点击对齐该时刻</p></div>
-<span class="chart-value" id="chart-memory-label" style="color:var(--green)">{' · '.join(mem_bits)}</span></div>{mem_svg}</article>
+<p class="chart-axis-hint">纵轴：内存 (MB) · 横轴：时间 · 点击对齐该时刻</p></div><div><span class="chart-value" id="chart-memory-label" style="color:var(--green)">{' · '.join(mem_bits)}</span><div class="chart-actions"><button type="button" class="chart-scale-btn" data-chart-scale="-1" title="缩小图表" aria-label="缩小图表" disabled>-</button><span class="chart-scale-status">1x</span><button type="button" class="chart-scale-btn" data-chart-scale="1" title="放大图表" aria-label="放大图表">+</button></div></div></div><div class="chart-viewport">{mem_svg}</div></article>
 </div>
 <section class="table-card">
 <div class="chart-title"><div><p class="eyebrow">SAMPLES</p><h3>采样明细</h3>

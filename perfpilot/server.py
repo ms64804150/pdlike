@@ -8,6 +8,7 @@ import re
 import socket
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty
@@ -23,6 +24,70 @@ from .session import DeviceBusyError, NotForegroundError, manager
 from .android_fg import foreground_info
 from .store import RunStore
 from .watch import registry
+
+
+class UiLifecycle:
+    """Track browser clients without controlling the local Agent lifetime."""
+
+    reconnect_grace_seconds = 5
+    heartbeat_timeout_seconds = 30
+
+    def __init__(self) -> None:
+        self._clients: dict[str, float] = {}
+        self._seen_client = False
+        self._closed = False
+        self._timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+
+    def connect(self, client_id: str) -> None:
+        self._touch(client_id)
+
+    def heartbeat(self, client_id: str) -> None:
+        self._touch(client_id)
+
+    def disconnect(self, client_id: str) -> None:
+        with self._lock:
+            self._clients.pop(client_id, None)
+            self._schedule_locked(
+                self.reconnect_grace_seconds if not self._clients else self.heartbeat_timeout_seconds
+            )
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+
+    def _touch(self, client_id: str) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._seen_client = True
+            self._clients[client_id] = time.monotonic()
+            self._schedule_locked(self.heartbeat_timeout_seconds)
+
+    def _schedule_locked(self, delay: float) -> None:
+        if self._closed:
+            return
+        if self._timer:
+            self._timer.cancel()
+        self._timer = threading.Timer(delay, self._expire_clients)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _expire_clients(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            now = time.monotonic()
+            self._clients = {
+                client_id: seen_at
+                for client_id, seen_at in self._clients.items()
+                if now - seen_at < self.heartbeat_timeout_seconds
+            }
+            if self._clients:
+                self._schedule_locked(self.heartbeat_timeout_seconds)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -94,7 +159,12 @@ class Handler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/v1/devices/([^/]+)/foreground", path)
         if match:
             device = next((item for item in registry.snapshot() if item["id"] == match.group(1)), None)
-            return self.send_json(foreground_info(device or {"id": match.group(1), "platform": "android"}))
+            try:
+                payload = foreground_info(device or {"id": match.group(1), "platform": "android"})
+            except Exception as error:
+                log.exception("[Foreground] query failed device=%s err=%s", match.group(1), error)
+                payload = {"supported": True, "package": None, "label": None, "error": "读取前台应用失败"}
+            return self.send_json(payload)
         if path == "/api/v1/reports" or path == "/api/v1/runs":
             return self.send_json({"reports": manager.catalog(), "runs": manager.catalog()})
         if path == "/api/v1/runs/active":
@@ -211,6 +281,18 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             data = self.read_json()
+            if path in ("/api/v1/ui/connect", "/api/v1/ui/heartbeat", "/api/v1/ui/disconnect"):
+                client_id = str(data.get("clientId") or "").strip()
+                if not client_id:
+                    return self.send_json({"error": "clientId is required"}, 400)
+                lifecycle = self.server.ui_lifecycle
+                if path == "/api/v1/ui/connect":
+                    lifecycle.connect(client_id)
+                elif path == "/api/v1/ui/heartbeat":
+                    lifecycle.heartbeat(client_id)
+                else:
+                    lifecycle.disconnect(client_id)
+                return self.send_json({"status": "ok"})
             if path == "/api/v1/capabilities":
                 device_id = data.get("deviceId")
                 device = next((item for item in registry.snapshot() if item["id"] == device_id), {})
@@ -400,6 +482,10 @@ class AgentHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = False
     daemon_threads = True
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.ui_lifecycle = UiLifecycle()
+
     def server_bind(self) -> None:
         if os.name == "nt":
             try:
@@ -408,8 +494,18 @@ class AgentHTTPServer(ThreadingHTTPServer):
                 pass
         super().server_bind()
 
+    def server_close(self) -> None:
+        self.ui_lifecycle.close()
+        super().server_close()
 
-def serve(host: str = "127.0.0.1", port: int = 8765, on_ready: Any = None) -> None:
+
+def serve(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    on_ready: Any = None,
+    on_already_running: Any = None,
+    on_shutdown: Any = None,
+) -> None:
     log = get_logger("http")
     index = WEB_ROOT / "index.html"
     log.info(
@@ -424,6 +520,16 @@ def serve(host: str = "127.0.0.1", port: int = 8765, on_ready: Any = None) -> No
     try:
         server = AgentHTTPServer((host, port), Handler)
     except OSError as error:
+        # Another launch may have passed the pre-flight health check before
+        # the first process finished binding. Let the caller reopen a verified
+        # existing Agent rather than treating this normal double-click race as
+        # a fatal port conflict.
+        if on_already_running:
+            try:
+                if on_already_running():
+                    return
+            except Exception:
+                log.exception("[Agent] existing-instance callback failed host=%s port=%s", host, port)
         log.error("[Agent] listen failed pid=%s host=%s port=%s err=%s", os.getpid(), host, port, error)
         print(f"端口 {port} 已被占用，多半是旧的 PerfPilot Agent 没关掉。请先结束占用该端口的 python 进程，再重新启动。")
         sys.stdout.flush()
@@ -443,7 +549,14 @@ def serve(host: str = "127.0.0.1", port: int = 8765, on_ready: Any = None) -> No
             # the Agent port occupied.
             server.server_close()
         finally:
-            manager.shutdown()
+            try:
+                manager.shutdown()
+            finally:
+                if on_shutdown:
+                    try:
+                        on_shutdown()
+                    except Exception:
+                        log.exception("[Agent] shutdown callback failed")
 
 
 def main() -> None:

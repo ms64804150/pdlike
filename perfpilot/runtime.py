@@ -294,6 +294,36 @@ def ensure_adb_server() -> None:
         log.warning("adb start-server failed: %s", error)
 
 
+def stop_adb_server() -> None:
+    """Stop the bundled ADB daemon during a normal PerfPilot shutdown."""
+    from .logutil import get_logger
+
+    log = get_logger("adb")
+    adb = adb_executable()
+    if not Path(adb).is_file() and not shutil.which(adb):
+        return
+    try:
+        result = subprocess.run(
+            [adb, "kill-server"],
+            cwd=adb_cwd() or None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            env=adb_env(),
+            **subprocess_kwargs(),
+        )
+        log.info(
+            "adb kill-server on shutdown rc=%s stdout=%s stderr=%s",
+            result.returncode,
+            (result.stdout or "").strip()[:200],
+            (result.stderr or "").strip()[:200],
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log.warning("adb kill-server on shutdown failed: %s", error)
+
+
 def adb_env() -> dict[str, str]:
     env = process_env()
     env.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
