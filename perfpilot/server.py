@@ -213,7 +213,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload = {"supported": True, "package": None, "label": None, "error": "读取前台应用失败"}
             return self.send_json(payload)
         if path == "/api/v1/reports" or path == "/api/v1/runs":
-            return self.send_json({"reports": manager.catalog(), "runs": manager.catalog()})
+            catalog = manager.catalog()
+            return self.send_json({"reports": catalog, "runs": catalog})
         if path == "/api/v1/runs/active":
             return self.send_json({"runs": manager.active()})
         match = re.fullmatch(r"/api/v1/devices/([^/]+)/applications", path)

@@ -126,10 +126,26 @@ function setView(view) {
   document.querySelectorAll('.nav-item').forEach((el) => el.classList.toggle('active', el.dataset.view === view));
   const titles = { overview: '监测首页', devices: '设备管理', monitor: '实时监控', reports: '检测报告', settings: '系统设置' };
   $('page-title').textContent = titles[view];
+  updateRefreshButton(view);
   if (view === 'devices') renderDevicesTable();
   if (view === 'reports') renderReports();
   if (view === 'settings') renderUpdateSettings();
   if (view === 'monitor') renderActiveMonitor();
+}
+
+function updateRefreshButton(view) {
+  const button = $('refresh-button');
+  const label = $('refresh-button-label');
+  if (!button || !label) return;
+  const labels = {
+    overview: '刷新设备',
+    devices: '刷新设备',
+    monitor: '同步视图',
+    reports: '刷新报告',
+    settings: '刷新状态',
+  };
+  label.textContent = labels[view] || '刷新';
+  button.title = label.textContent;
 }
 
 function renderUpdateSettings() {
@@ -2340,11 +2356,28 @@ async function renderReports() {
 
 const REPORTS_PER_PAGE = 10;
 
+function reportStatusText(report) {
+  if (report.status === 'running') {
+    const count = Number(report.sampleCount || 0);
+    return '监测中' + (count ? ' · 已采集 ' + count + ' 条' : ' · 等待首条数据');
+  }
+  if (report.status === 'ready') return '正在启动监测';
+  if (report.status === 'finalizing') return '正在生成报告';
+  return report.reportReady ? '报告可用' : report.reportRecoverable ? '可生成报告' : '记录已保存 · ' + (report.error || '报告不可用');
+}
+
 function reportRowMarkup(report) {
   const date = new Date((report.createdAt || report.startedAtMs / 1000 || 0) * 1000).toLocaleString();
-  const status = report.reportReady ? '报告可用' : report.reportRecoverable ? '可生成报告' : `记录已保存 · ${report.error || '报告不可用'}`;
+  const status = reportStatusText(report);
   const runId = report.runId || report.sessionId;
-  return `<article class="report-row"><div><b>${escapeHtml(reportListTitle(report))}</b><small>${escapeHtml(report.bundle || report.packageId || '未知应用')} · ${date}</small></div><div class="report-row-meta"><span>${status}</span>${report.reportReady || report.reportRecoverable ? `<a class="secondary-button report-open" href="/api/v1/runs/${encodeURIComponent(runId)}/report" target="_blank" rel="noopener">${report.reportReady ? '打开报告' : '生成并打开'}</a>` : '<em>无 HTML 报告</em>'}</div></article>`;
+  const reportAction = report.reportReady || report.reportRecoverable
+    ? '<a class="secondary-button report-open" href="/api/v1/runs/' + encodeURIComponent(runId) + '/report" target="_blank" rel="noopener">' + (report.reportReady ? '打开报告' : '生成并打开') + '</a>'
+    : report.status === 'running' || report.status === 'ready' || report.status === 'finalizing'
+      ? '<em>完成后可生成报告</em>'
+      : '<em>无 HTML 报告</em>';
+  return '<article class="report-row"><div><b>' + escapeHtml(reportListTitle(report)) + '</b><small>'
+    + escapeHtml(report.bundle || report.packageId || '未知应用') + ' · ' + date
+    + '</small></div><div class="report-row-meta"><span>' + escapeHtml(status) + '</span>' + reportAction + '</div></article>';
 }
 
 async function renderReports() {
@@ -2612,23 +2645,40 @@ async function load() {
 
 async function refreshData() {
   const button = $('refresh-button');
+  const label = $('refresh-button-label');
+  const view = document.querySelector('.nav-item.active')?.dataset.view || 'overview';
+  const labelText = label ? label.textContent : '刷新';
   if (button) {
     button.disabled = true;
     button.classList.add('is-refreshing');
   }
+  if (label) label.textContent = '刷新中…';
   try {
-    await load();
-    const monitorOpen = Boolean($('monitor-view') && $('monitor-view').classList.contains('active-view'));
-    const keepLive = monitorOpen && visibleSessions().some((session) => session.status === 'running') && state.apps.length;
-    if (state.device && state.devices.some((device) => device.id === state.device.id) && !keepLive) {
-      await selectDevice(state.device.id);
-    } else if (keepLive) {
-      console.info('[MonitorTab] refresh skip app list runId=%s', state.activeRunId);
+    let message = '';
+    if (view === 'reports') {
+      await renderReports();
+      message = '报告列表已刷新';
+    } else if (view === 'monitor') {
+      renderActiveMonitor();
+      message = '实时视图已同步';
+    } else if (view === 'settings') {
+      const agent = await api('/api/v1/agent');
+      if ($('data-dir')) $('data-dir').textContent = agent.dataDir || '';
+      refreshUpdateIndicator();
+      message = '本机状态已刷新';
+    } else {
+      const result = await api('/api/v1/devices?fresh=1');
+      applyDeviceSnapshot(result.devices, { removed: [] });
+      message = result.devices.length ? '设备列表已刷新 · ' + result.devices.length + ' 台' : '未检测到设备';
+      if (result.agent && result.agent.version) {
+        const versionNode = document.querySelector('.agent-status small');
+        if (versionNode) versionNode.textContent = '本机服务 · v' + result.agent.version;
+      }
     }
-    const view = document.querySelector('.nav-item.active')?.dataset.view;
-    if (view === 'reports') await renderReports();
-    if (view === 'devices') renderDevicesTable();
-    if (view === 'monitor') renderActiveMonitor();
+    if ($('connection-pill')) {
+      $('connection-pill').textContent = message;
+      $('connection-pill').className = message === '未检测到设备' ? 'pill muted' : 'pill';
+    }
   } catch (error) {
     $('connection-pill').textContent = error.message || '刷新失败';
     $('connection-pill').className = 'pill muted';
@@ -2637,6 +2687,7 @@ async function refreshData() {
       button.disabled = false;
       button.classList.remove('is-refreshing');
     }
+    if (label) label.textContent = labelText;
   }
 }
 

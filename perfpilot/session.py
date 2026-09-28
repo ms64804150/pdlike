@@ -461,13 +461,14 @@ class SessionManager:
             for item in list_runs()
             if item.get("runId") and item.get("status") in ("completed", "failed")
         }
-        for session in self.runs.values():
-            if session.get("status") not in ("completed", "failed") or session["runId"] in records:
+        for session in list(self.runs.values()):
+            status = session.get("status")
+            if status not in ("ready", "running", "finalizing", "completed", "failed") or session["runId"] in records:
                 continue
             records[session["runId"]] = {
                 "runId": session["runId"],
                 "sessionId": session["runId"],
-                "status": session.get("status"),
+                "status": status,
                 "reportReady": session.get("reportReady", False),
                 "error": session.get("error"),
                 "device": session.get("device"),
@@ -479,6 +480,7 @@ class SessionManager:
                 "versionCode": session.get("versionCode"),
                 "createdAt": (session.get("startedAtMs") or 0) / 1000,
                 "startedAtMs": session.get("startedAtMs"),
+                "sampleCount": len(session.get("samples") or []),
                 "report": "report.html",
             }
         result = sorted(records.values(), key=lambda item: item.get("startedAtMs") or item.get("createdAt") or 0, reverse=True)
@@ -488,7 +490,10 @@ class SessionManager:
             store = RunStore(item["runId"])
             item["reportReady"] = store.report_path.is_file()
             item["reportRecoverable"] = (
-                not item["reportReady"] and item.get("wantReport") is not False and store.samples_path.is_file()
+                item.get("status") in ("completed", "failed")
+                and not item["reportReady"]
+                and item.get("wantReport") is not False
+                and store.samples_path.is_file()
             )
             item["title"] = report_display_name(item)
         return result

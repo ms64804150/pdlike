@@ -50,8 +50,11 @@ function Stop-LockedDist {
     $dist = Join-Path $Root "dist\PerfPilot"
     Write-Host "[Packaging] stop processes locking $dist"
     Get-Process PerfPilot -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Host ("[Packaging] stop PerfPilot pid={0} path={1}" -f $_.Id, $_.Path)
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        $exe = [string]$_.Path
+        if ($exe -and $exe.StartsWith($dist, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-Host ("[Packaging] stop bundled PerfPilot pid={0} path={1}" -f $_.Id, $exe)
+            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        }
     }
     Get-CimInstance Win32_Process -Filter "Name='adb.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
         $exe = [string]$_.ExecutablePath
