@@ -48,6 +48,7 @@ hiddenimports = [
     "perfpilot.ios_lockdown",
     "perfpilot.win_compat",
     "perfpilot.diagnose",
+    "perfpilot.update",
     "pymobiledevice3",
     "pymobiledevice3.lockdown",
     "pymobiledevice3.usbmux",

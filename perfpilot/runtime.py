@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import os
 import shutil
 import subprocess
@@ -322,6 +324,68 @@ def stop_adb_server() -> None:
         )
     except (OSError, subprocess.SubprocessError) as error:
         log.warning("adb kill-server on shutdown failed: %s", error)
+
+
+def restart_adb_server() -> None:
+    """Restart ADB without stopping the HTTP Agent."""
+    adb = adb_executable()
+    if not Path(adb).is_file() and not shutil.which(adb):
+        raise RuntimeError("未找到 adb，请检查平台工具是否完整")
+    for action in ("kill-server", "start-server", "devices"):
+        try:
+            result = subprocess.run(
+                [adb, action],
+                cwd=adb_cwd() or None,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                env=adb_env(),
+                **subprocess_kwargs(),
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"adb {action} 执行失败：{error}") from error
+        if action == "kill-server" and os.name == "nt":
+            _clear_stale_adb_listener()
+        if result.returncode != 0 and action != "kill-server":
+            detail = (result.stderr or result.stdout or "").strip()[:300]
+            raise RuntimeError(f"adb {action} 失败：{detail or result.returncode}")
+
+
+def _clear_stale_adb_listener() -> None:
+    port = os.environ.get("ANDROID_ADB_SERVER_PORT", "5037")
+    if not port.isdigit() or not 0 < int(port) < 65536:
+        raise RuntimeError("ADB 端口设置无效，无法安全检查残留进程")
+    try:
+        connections = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True,
+            timeout=10, **subprocess_kwargs(),
+        )
+        if connections.returncode != 0:
+            raise RuntimeError("无法检查 ADB 监听端口")
+        pids = {
+            fields[4] for line in connections.stdout.splitlines()
+            if (fields := line.split()) and len(fields) == 5
+            and fields[0].upper() == "TCP" and fields[1].rsplit(":", 1)[-1] == port
+            and fields[3].upper() == "LISTENING" and fields[4].isdigit()
+        }
+        for pid in pids:
+            owner = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=10, **subprocess_kwargs(),
+            )
+            rows = list(csv.reader(io.StringIO(owner.stdout)))
+            if owner.returncode != 0 or len(rows) != 1 or len(rows[0]) < 2 or rows[0][0].lower() != "adb.exe" or rows[0][1] != pid:
+                raise RuntimeError(f"ADB 端口 {port} 仍被 PID {pid} 占用，但无法确认是 adb.exe；未结束该进程")
+            killed = subprocess.run(
+                ["taskkill", "/PID", pid, "/F"], capture_output=True, text=True,
+                timeout=10, **subprocess_kwargs(),
+            )
+            if killed.returncode != 0:
+                raise RuntimeError(f"无法清理 ADB 端口 {port} 的残留进程 PID {pid}")
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"检查 ADB 监听端口失败：{error}") from error
 
 
 def adb_env() -> dict[str, str]:

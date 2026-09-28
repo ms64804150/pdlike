@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import atexit
+import ctypes
 import json
 import os
 import runpy
+import signal
 import subprocess
 import sys
 import time
@@ -16,6 +18,56 @@ import webbrowser
 from perfpilot.diagnose import diagnose, layout_ok
 from perfpilot.logutil import get_logger, setup_logging
 from perfpilot.runtime import ensure_adb_server, prepare_environment, stop_adb_server
+
+
+_console_handler_ref: object | None = None
+
+
+def _install_console_close_handler() -> None:
+    """Turn a Windows console close event into the normal shutdown path.
+
+    PyInstaller's console bootloader can hide the console window, but closing
+    that window still sends a Windows console control event.  Without a
+    handler, the process may be terminated before ``serve()`` reaches its
+    cleanup block, leaving collector processes and bundled ADB alive.
+    """
+    if os.name != "nt":
+        return
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is None:
+        return
+
+    def _on_console_close(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(sigbreak, _on_console_close)
+    except (OSError, ValueError):
+        # The handler is best-effort: this can fail when called outside the
+        # interpreter's main thread, while normal server shutdown remains
+        # available through Ctrl+C and the web UI.
+        return
+
+    # SIGBREAK covers Ctrl+Break, but the window X button sends
+    # CTRL_CLOSE_EVENT, which Python does not consistently translate into a
+    # Python signal.  Keep the ctypes callback alive for the process lifetime
+    # and translate only close/logoff/shutdown events into SIGINT.
+    global _console_handler_ref
+    handler_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+
+    @handler_type
+    def _native_console_handler(event: int) -> bool:
+        if event in (2, 5, 6):  # CTRL_CLOSE/LOGOFF/SHUTDOWN_EVENT
+            try:
+                os.kill(os.getpid(), signal.SIGINT)
+            except OSError:
+                pass
+            return True
+        return False
+
+    if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_native_console_handler, True):
+        return
+    _console_handler_ref = _native_console_handler
 
 
 def _run_collect(kind: str, rest: list[str]) -> None:
@@ -139,6 +191,11 @@ def main() -> None:
         stop_adb_server()
 
     atexit.register(stop_adb_once)
+
+    # A console window close must use the same cleanup path as Ctrl+C.  This
+    # is especially important for the frozen portable build, where a hidden
+    # console can otherwise leave the executable directory locked.
+    _install_console_close_handler()
 
     def on_ready() -> None:
         log.info("[Agent] listen ready url=%s", url)

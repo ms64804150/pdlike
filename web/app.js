@@ -2,6 +2,9 @@ const state = {
   devices: [],
   device: null,
   apps: [],
+  appsError: '',
+  adbRecovering: false,
+  adbRecoveryStatus: '',
   app: null,
   selectedBundle: null,
   capabilities: [],
@@ -176,16 +179,50 @@ function deviceIds(list) {
   return list.map((device) => device.id).sort().join('\n');
 }
 
+function androidRecoveryHelp() {
+  const busy = state.adbRecovering || sessionList().some((session) => session.device?.platform === 'android' && ['ready', 'running', 'finalizing'].includes(session.status));
+  const status = state.adbRecoveryStatus ? `<p role="status">${escapeHtml(state.adbRecoveryStatus)}</p>` : '';
+  return `<div class="connection-help"><p>Android：检查数据线和 USB 调试授权；可在手机上撤销 USB 调试授权，重新插线并允许调试。</p><p>仍无法读取时，可重置本机 ADB 服务并重新扫描。正在监测时请先停止监测。</p><button type="button" class="ghost-button adb-restart" ${busy ? 'disabled' : ''}>重置 ADB 并重试</button>${status}</div>`;
+}
+
+async function restartAdb() {
+  if (state.adbRecovering) return;
+  state.adbRecovering = true;
+  state.adbRecoveryStatus = '正在重置 ADB，页面可继续使用…';
+  paintDeviceList();
+  renderApps();
+  try {
+    await api('/api/v1/adb/restart', { method: 'POST', body: '{}' });
+    state.adbRecoveryStatus = 'ADB 已重启，正在重新扫描设备…';
+    const result = await api('/api/v1/devices?fresh=1');
+    applyDeviceSnapshot(result.devices);
+    const android = state.device?.platform === 'android' && result.devices.find((device) => device.id === state.device.id);
+    if (android) await selectDevice(android.id);
+    state.adbRecoveryStatus = android && !state.apps.length
+      ? '已重试，仍无法读取应用。请检查手机授权和连接。'
+      : '扫描完成。若设备仍未出现，请重新插线并确认手机授权。';
+  } catch (error) {
+    state.adbRecoveryStatus = error.message || '重置失败，请检查 Agent 日志';
+  } finally {
+    state.adbRecovering = false;
+    paintDeviceList();
+    renderApps();
+  }
+}
+
 function paintDeviceList() {
   const list = $('device-list');
   if (!state.devices.length) {
-    list.innerHTML = '<div class="empty-state">未检测到设备，请检查 USB / ADB 连接</div>';
+    list.innerHTML = `<div class="empty-state">未检测到设备，请检查 USB 连接。iPhone 请解锁并重新信任此电脑。${androidRecoveryHelp()}</div>`;
     $('device-state').textContent = '未连接';
     $('device-state').className = 'state-badge waiting';
     if (!hasSessions()) {
     state.app = null;
     state.selectedBundle = null;
     state.capabilities = [];
+    state.apps = [];
+    state.appsError = '';
+    state.selectGen++;
       $('app-list').innerHTML = '<div class="empty-state">先选择一个设备</div>';
       $('capability-list').innerHTML = '';
       $('start-button').disabled = true;
@@ -380,7 +417,7 @@ function renderApps() {
   else if (query && !apps.length && state.apps.length) emptyCopy = '没有匹配该包名的应用';
   $('app-list').innerHTML = apps.length
     ? apps.map((app) => `<label class="app-row"><input type="radio" name="app" value="${escapeHtml(app.bundle)}" ${state.selectedBundle === app.bundle ? 'checked' : ''}><div><strong>${escapeHtml(app.name)}</strong><small>${escapeHtml(app.bundle)} · ${escapeHtml(appVersionText(app) || '版本未知')}</small></div></label>`).join('')
-    : `<div class="empty-state">${emptyCopy}</div>`;
+    : `<div class="empty-state">${escapeHtml(emptyCopy)}${state.device?.platform === 'android' && state.devices.some((device) => device.id === state.device.id) && !query ? androidRecoveryHelp() : ''}</div>`;
   document.querySelectorAll('input[name="app"]').forEach((input) => input.addEventListener('change', () => selectApp(input.value)));
 }
 
@@ -2342,6 +2379,9 @@ function on(id, event, handler) {
 
 document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => setView(button.dataset.view)));
 on('refresh-button', 'click', refreshData);
+document.addEventListener('click', (event) => {
+  if (event.target.closest('.adb-restart')) restartAdb();
+});
 on('app-search', 'input', renderApps);
 on('start-button', 'click', startSession);
 on('stop-button', 'click', stopSession);

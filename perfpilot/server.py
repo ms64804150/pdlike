@@ -20,10 +20,13 @@ from .devices import applications, capabilities
 from .logutil import get_logger
 from .paths import WEB_ROOT, data_root
 from .report import render_report, report_filename
+from .runtime import restart_adb_server
 from .session import DeviceBusyError, NotForegroundError, manager
 from .android_fg import foreground_info
 from .store import RunStore
 from .watch import registry
+
+_adb_restart_lock = threading.Lock()
 
 
 class UiLifecycle:
@@ -285,6 +288,20 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             data = self.read_json()
+            if path == "/api/v1/adb/restart":
+                origin = self.headers.get("Origin")
+                if origin and origin != f"http://127.0.0.1:{self.server.server_port}":
+                    return self.send_json({"error": "仅允许本机页面重置 ADB"}, 403)
+                if not _adb_restart_lock.acquire(blocking=False):
+                    return self.send_json({"error": "ADB 正在重置，请稍候"}, 409)
+                try:
+                    if any(run.get("device", {}).get("platform") == "android" for run in manager.active()):
+                        return self.send_json({"error": "Android 设备正在监测，请先停止监测再重置 ADB"}, 409)
+                    restart_adb_server()
+                    registry.kick()
+                    return self.send_json({"status": "ok"})
+                finally:
+                    _adb_restart_lock.release()
             if path in ("/api/v1/ui/connect", "/api/v1/ui/heartbeat", "/api/v1/ui/disconnect"):
                 client_id = str(data.get("clientId") or "").strip()
                 if not client_id:
