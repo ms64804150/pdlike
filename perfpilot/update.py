@@ -6,6 +6,8 @@ import json
 import os
 import platform
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -14,6 +16,10 @@ from . import __version__
 
 REPOSITORY = os.environ.get("PERFPILOT_UPDATE_REPOSITORY", "ms64804150/pdlike")
 LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+UPDATE_CACHE_TTL_SECONDS = 10 * 60
+_cache_lock = threading.Lock()
+_cache_until = 0.0
+_cache_result: dict[str, Any] | None = None
 
 
 def _version_key(value: str) -> tuple[int, ...]:
@@ -38,6 +44,14 @@ def _asset_name() -> str:
 
 def check_for_update(timeout: float = 5) -> dict[str, Any]:
     """Return public update metadata without downloading or installing anything."""
+    global _cache_result, _cache_until
+    now = time.monotonic()
+    with _cache_lock:
+        if _cache_result is not None and now < _cache_until:
+            result = dict(_cache_result)
+            result["cached"] = True
+            return result
+
     request = urllib.request.Request(
         LATEST_RELEASE_URL,
         headers={
@@ -49,23 +63,42 @@ def check_for_update(timeout: float = 5) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code == 403:
+            reset = error.headers.get("X-RateLimit-Reset")
+            reset_text = ""
+            if reset and str(reset).isdigit():
+                reset_text = f"，预计 {time.strftime('%H:%M:%S', time.localtime(int(reset)))} 后恢复"
+            result = {
+                "ok": False,
+                "currentVersion": __version__,
+                "error": f"GitHub 更新接口触发访问频率限制{reset_text}，请稍后再试",
+            }
+        else:
+            result = {"ok": False, "currentVersion": __version__, "error": str(error)}
     except (OSError, ValueError, urllib.error.URLError) as error:
-        return {"ok": False, "currentVersion": __version__, "error": str(error)}
+        result = {"ok": False, "currentVersion": __version__, "error": str(error)}
+    else:
+        tag = str(payload.get("tag_name") or "")
+        asset_name = _asset_name()
+        asset = next((item for item in payload.get("assets") or [] if item.get("name") == asset_name), None)
+        available = bool(tag and asset and _is_newer(tag))
+        digest = str((asset or {}).get("digest") or "")
+        result = {
+            "ok": True,
+            "currentVersion": __version__,
+            "latestVersion": tag.lstrip("v"),
+            "available": available,
+            "assetName": asset_name,
+            "downloadUrl": (asset or {}).get("browser_download_url"),
+            "sha256": digest.removeprefix("sha256:") or None,
+            "releaseNotes": str(payload.get("body") or "").strip(),
+            "releaseUrl": payload.get("html_url"),
+            "error": None if asset or not _is_newer(tag) else f"Release is missing {asset_name}",
+        }
 
-    tag = str(payload.get("tag_name") or "")
-    asset_name = _asset_name()
-    asset = next((item for item in payload.get("assets") or [] if item.get("name") == asset_name), None)
-    available = bool(tag and asset and _is_newer(tag))
-    digest = str((asset or {}).get("digest") or "")
-    return {
-        "ok": True,
-        "currentVersion": __version__,
-        "latestVersion": tag.lstrip("v"),
-        "available": available,
-        "assetName": asset_name,
-        "downloadUrl": (asset or {}).get("browser_download_url"),
-        "sha256": digest.removeprefix("sha256:") or None,
-        "releaseNotes": str(payload.get("body") or "").strip(),
-        "releaseUrl": payload.get("html_url"),
-        "error": None if asset or not _is_newer(tag) else f"Release is missing {asset_name}",
-    }
+    with _cache_lock:
+        _cache_result = dict(result)
+        _cache_until = time.monotonic() + UPDATE_CACHE_TTL_SECONDS
+    result["cached"] = False
+    return result

@@ -175,6 +175,38 @@ async function checkForUpdates() {
   }
 }
 
+// Keep the update action explicit: download first, then stop and replace the
+// portable folder after Ctrl+C so the running EXE is never overwritten.
+async function checkForUpdates() {
+  const button = $('check-update');
+  const status = $('update-status');
+  const notes = $('update-notes');
+  if (button) button.disabled = true;
+  if (status) status.textContent = '正在检查 GitHub Releases…';
+  if (notes) notes.textContent = '';
+  try {
+    const result = await api('/api/v1/update');
+    if (!result.ok) throw new Error(result.error || '无法检查更新');
+    if (!result.available) {
+      if (status) status.textContent = `当前已是最新版本 v${result.currentVersion}`;
+      return;
+    }
+    if (status) status.textContent = `发现 v${result.latestVersion}，已验证适配包：${result.assetName}`;
+    if (notes) notes.textContent = [
+      result.releaseNotes || '已准备好新版本。',
+      '下载完成后，请先回到黑色终端按 Ctrl+C 关闭当前服务，再解压覆盖旧目录并重新启动 PerfPilot。',
+    ].filter(Boolean).join(' ');
+    if (button) {
+      button.textContent = '下载更新';
+      button.dataset.downloadUrl = result.downloadUrl || result.releaseUrl || '';
+    }
+  } catch (error) {
+    if (status) status.textContent = error.message || '检查更新失败';
+  } finally {
+    if (button && button.textContent !== '下载更新') button.disabled = false;
+  }
+}
+
 function deviceIds(list) {
   return list.map((device) => device.id).sort().join('\n');
 }
