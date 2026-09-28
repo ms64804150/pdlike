@@ -87,3 +87,34 @@ macOS：
    - `PerfPilot-macos-x86_64.dmg`（Intel，如有）
 
 客户端在“系统设置 → 软件更新”中检查更新；仅当 Release 的版本号更高且包含当前平台对应附件时才提示下载。GitHub Release 附件的 SHA-256 会随 API 返回，供后续自动安装流程校验使用。
+
+### Windows 一键构建并发布
+
+首次在发布电脑安装并登录 GitHub CLI：
+
+```powershell
+winget install --id GitHub.cli
+gh auth login
+```
+
+每次发布时，先修改 `perfpilot/__init__.py` 中的 `__version__`，再提交并推送：
+
+```powershell
+git add .
+git commit -m "release: v0.3.0"
+git push origin main
+```
+
+随后只需执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\packaging\publish-github-release.ps1
+```
+
+脚本会检查 GitHub 登录状态、工作区是否干净、当前 commit 是否已推送；随后构建 Windows ZIP，并以 `v<版本号>` 自动创建 Release、上传 `PerfPilot-portable-x64.zip`。若 tag 已存在，则覆盖上传同名 Windows 附件。
+
+如只想重新上传已经构建好的包，可跳过构建：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\packaging\publish-github-release.ps1 -SkipBuild
+```

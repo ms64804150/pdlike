@@ -459,10 +459,10 @@ class SessionManager:
         records = {
             item["runId"]: item
             for item in list_runs()
-            if item.get("runId") and item.get("status") != "discarded"
+            if item.get("runId") and item.get("status") in ("completed", "failed")
         }
         for session in self.runs.values():
-            if session.get("status") == "discarded":
+            if session.get("status") not in ("completed", "failed") or session["runId"] in records:
                 continue
             records[session["runId"]] = {
                 "runId": session["runId"],
@@ -485,6 +485,11 @@ class SessionManager:
         for item in result:
             item.setdefault("sessionId", item.get("runId"))
             item.setdefault("createdAt", (item.get("startedAtMs") or 0) / 1000)
+            store = RunStore(item["runId"])
+            item["reportReady"] = store.report_path.is_file()
+            item["reportRecoverable"] = (
+                not item["reportReady"] and item.get("wantReport") is not False and store.samples_path.is_file()
+            )
             item["title"] = report_display_name(item)
         return result
 

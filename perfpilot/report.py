@@ -101,26 +101,16 @@ def _clock(ms: float) -> str:
 
 def _fps_max(values: list[Optional[float]]) -> float:
     peak = max((v for v in values if v is not None), default=0.0)
-    if peak <= 62:
-        return 60.0
-    if peak <= 90:
-        return 90.0
-    if peak <= 120:
-        return 120.0
-    if peak <= 144:
-        return 144.0
-    if peak <= 165:
-        return 165.0
-    return float(((int(peak) + 29) // 30) * 30)
+    if peak < 35:
+        return 40.0
+    if peak < 75:
+        return 100.0
+    return 120.0
 
 
 def _cpu_max(values: list[Optional[float]]) -> float:
     peak = max((v for v in values if v is not None), default=0.0)
-    if peak <= 50:
-        return 50.0
-    if peak <= 100:
-        return 100.0
-    return float(min(400, ((int(peak) + 24) // 25) * 25))
+    return 40.0 if peak < 35 else 100.0
 
 
 def _mem_max(values: list[Optional[float]]) -> float:
@@ -451,7 +441,7 @@ def _inspect_script(payload: dict[str, Any]) -> str:
       applyInspect(nearestIndex(t0 + ((x - padL) / plotW) * tSpan), 'chart');
     });
   });
-    document.querySelectorAll('[data-chart-scale]').forEach(function (button) {
+    document.querySelectorAll('button[data-chart-scale]').forEach(function (button) {
         button.addEventListener('click', function () {
             const card = button.closest('.chart-card');
             if (!card) return;
@@ -851,12 +841,12 @@ def render_report(meta: dict[str, Any], samples: list[dict[str, Any]]) -> str:
     last_swap = next((v for v in reversed(swap) if v is not None), None)
 
     fps_svg = (
-        _chart([{"values": fps, "color": FPS_COLOR, "label": "FPS"}], times, 0, _fps_max(fps), "FPS")
+        _chart([{"values": fps, "color": FPS_COLOR, "label": "FPS"}], times, 0, _fps_max(fps), "FPS", height=260)
         if len(times) >= 2
         else "<p class='empty'>样本不足</p>"
     )
     cpu_svg = (
-        _chart([{"values": cpu, "color": CPU_COLOR, "label": "CPU"}], times, 0, _cpu_max(cpu), "%")
+        _chart([{"values": cpu, "color": CPU_COLOR, "label": "CPU"}], times, 0, _cpu_max(cpu), "%", height=260)
         if len(times) >= 2
         else "<p class='empty'>样本不足</p>"
     )
@@ -874,7 +864,7 @@ def render_report(meta: dict[str, Any], samples: list[dict[str, Any]]) -> str:
     if has_swap:
         mem_legend.append(("Swap PSS", SWAP_COLOR))
     mem_svg = (
-        _chart(mem_series, times, 0, _mem_max(mem_pool), "MB", height=220)
+        _chart(mem_series, times, 0, _mem_max(mem_pool), "MB", height=280)
         if len(times) >= 2
         else "<p class='empty'>样本不足</p>"
     )
@@ -985,7 +975,7 @@ h1{{font-size:28px;letter-spacing:-1px;margin:0 0 8px}}h2,h3{{margin:0}}
 .quality{{font-size:8px;padding:4px 6px;border-radius:20px;color:#318c69;background:#ddf3e6}}
 .metric-foot{{display:flex;gap:16px;border-top:1px solid #ebdfd8;margin-top:14px;padding-top:11px;color:var(--muted);font-size:10px}}
 .metric-foot b{{color:var(--ink);margin-left:4px}}
-.chart-grid{{display:grid;grid-template-columns:1.2fr 1fr;gap:17px;margin-bottom:17px}}
+.chart-grid{{display:grid;grid-template-columns:minmax(0,1fr);gap:17px;margin-bottom:17px}}
 .chart-card{{background:#fff;border:1px solid rgba(196,213,208,.7);box-shadow:var(--shadow);padding:20px 22px}}
 .memory-chart{{grid-column:1/-1}}
 .chart-title{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}
@@ -1002,7 +992,7 @@ h1{{font-size:28px;letter-spacing:-1px;margin:0 0 8px}}h2,h3{{margin:0}}
 .chart-legend .leg.avg{{color:#8a999b}}
 .chart-legend .leg.avg i{{height:0;width:14px;border-top:2px dashed currentColor;background:transparent;border-radius:0}}
 .chart-viewport{{overflow-x:auto;overflow-y:hidden;margin-top:10px;padding-bottom:4px}}
-svg.report-chart{{width:max(100%,calc(720px * var(--chart-scale, 1)));margin:0;cursor:crosshair;display:block}}
+svg.report-chart{{width:calc(100% * var(--chart-scale, 1));height:auto;margin:0;cursor:crosshair;display:block}}
 .empty{{color:var(--muted);padding:24px 0}}
 .timeline-inspect{{background:#fff;border:1px solid var(--line);box-shadow:var(--shadow);padding:16px 22px 18px;margin-bottom:17px}}
 .timeline-inspect[hidden]{{display:none!important}}

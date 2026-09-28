@@ -1661,19 +1661,14 @@ function niceCeil(value, steps) {
 
 function fpsAxisMax(values) {
   const peak = Math.max(0, ...values.filter(Number.isFinite));
-  if (peak <= 62) return 60;
-  if (peak <= 90) return 90;
-  if (peak <= 120) return 120;
-  if (peak <= 144) return 144;
-  if (peak <= 165) return 165;
-  return Math.ceil(peak / 30) * 30;
+  if (peak < 35) return 40;
+  if (peak < 75) return 100;
+  return 120;
 }
 
 function cpuAxisMax(values) {
   const peak = Math.max(0, ...values.filter(Number.isFinite));
-  if (peak <= 50) return 50;
-  if (peak <= 100) return 100;
-  return Math.min(400, Math.ceil(peak / 25) * 25);
+  return peak < 35 ? 40 : 100;
 }
 
 function memAxisMax(values) {
@@ -1692,9 +1687,12 @@ function niceAxisStep(value) {
 
 function chartYAxis(kind, lists) {
   const values = finiteValues(lists);
-  if (!values.length) {
-    const yMax = kind === 'fps' ? 60 : kind === 'pct' ? 25 : 64;
+  if (kind === 'fps' || kind === 'pct') {
+    const yMax = kind === 'fps' ? fpsAxisMax(values) : cpuAxisMax(values);
     return { yMin: 0, yMax, step: yMax / 4 };
+  }
+  if (!values.length) {
+    return { yMin: 0, yMax: 64, step: 16 };
   }
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -2071,13 +2069,10 @@ async function renderReports() {
     }
     container.innerHTML = result.reports.map((report) => {
       const date = new Date((report.createdAt || report.startedAtMs / 1000 || 0) * 1000).toLocaleString();
-      const status = report.reportReady ? '报告可用' : `记录已保存 · ${report.error || '报告不可用'}`;
+      const status = report.reportReady ? '报告可用' : report.reportRecoverable ? '可生成报告' : `记录已保存 · ${report.error || '报告不可用'}`;
       const runId = report.runId || report.sessionId;
-      return `<article class="report-row"><div><b>${escapeHtml(reportListTitle(report))}</b><small>${escapeHtml(report.bundle || report.packageId || '未知应用')} · ${date}</small></div><div class="report-row-meta"><span>${status}</span>${report.reportReady ? `<button class="secondary-button report-open" data-session="${runId}">打开报告</button>` : '<em>无 HTML 报告</em>'}</div></article>`;
+      return `<article class="report-row"><div><b>${escapeHtml(reportListTitle(report))}</b><small>${escapeHtml(report.bundle || report.packageId || '未知应用')} · ${date}</small></div><div class="report-row-meta"><span>${status}</span>${report.reportReady || report.reportRecoverable ? `<a class="secondary-button report-open" href="/api/v1/runs/${encodeURIComponent(runId)}/report" target="_blank" rel="noopener">${report.reportReady ? '打开报告' : '生成并打开'}</a>` : '<em>无 HTML 报告</em>'}</div></article>`;
     }).join('');
-    container.querySelectorAll('.report-open').forEach((button) => {
-      button.addEventListener('click', () => window.open(`/api/v1/runs/${button.dataset.session}/report`, '_blank'));
-    });
   } catch (error) {
     container.innerHTML = `<div class="empty-state">${error.message}</div>`;
   }
@@ -2266,6 +2261,12 @@ async function stopAndFinalize(runId, reason, options = {}) {
     await api(`/api/v1/runs/${runId}/stop`, { method: 'POST', body: JSON.stringify({ save, report }) });
   } catch (error) {
     console.warn('[StopMonitor] stop request failed runId=%s reason=%s err=%s', runId, reason, error && error.message);
+    session.stopping = false;
+    session.status = 'running';
+    session.endedAt = null;
+    if (state.activeRunId === runId) renderActiveMonitor();
+    await showAppDialog(`停止监测失败：${error.message}`, '停止失败');
+    return;
   }
   await finishSession(runId, reason);
 }

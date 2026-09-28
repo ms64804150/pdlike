@@ -346,6 +346,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"runId": session["runId"], "sessionId": session["runId"], "status": "running"})
             match = re.fullmatch(r"/api/v1/(?:runs|sessions)/([^/]+)/stop", path)
             if match:
+                if not manager.get(match.group(1)):
+                    return self.send_json({"error": "Run not found"}, 404)
                 body = data if isinstance(data, dict) else {}
                 save = False if body.get("save") is False else True
                 report = False if body.get("report") is False else True
