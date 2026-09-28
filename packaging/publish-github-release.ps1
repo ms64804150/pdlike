@@ -57,8 +57,14 @@ if (-not (Test-Path -LiteralPath $Asset)) {
 }
 
 $ReleaseExists = $true
-& $Gh.Source release view $Tag --repo $Repository 2>$null
-if ($LASTEXITCODE -ne 0) { $ReleaseExists = $false }
+$PreviousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & $Gh.Source release view $Tag --repo $Repository 2>$null
+    $ReleaseExists = ($LASTEXITCODE -eq 0)
+} finally {
+    $ErrorActionPreference = $PreviousErrorActionPreference
+}
 if ($ReleaseExists) {
     Invoke-Checked $Gh.Source @("release", "upload", $Tag, $Asset, "--repo", $Repository, "--clobber")
     Write-Host "Updated GitHub Release $Tag with $Asset"
