@@ -144,7 +144,7 @@ function renderUpdateSettings() {
 
 function onUpdateButtonClick() {
   const url = $('check-update')?.dataset.downloadUrl;
-  if (url) window.open(url, '_blank');
+  if (url) window.location.assign(url);
   else checkForUpdates();
 }
 
