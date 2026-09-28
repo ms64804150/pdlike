@@ -113,6 +113,39 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as error:
             log.warning("[HTTP] sendJson write failed err=%s bytes=%s", error, len(body))
 
+    def stream_update_download(self) -> None:
+        """Download a GitHub Release asset through the local Agent.
+
+        The browser only receives a local attachment response, so the update
+        page never needs to expose or navigate to a GitHub asset URL.
+        """
+        from .update import UpdateDownloadError, open_update_download
+
+        log = get_logger("update")
+        try:
+            metadata, response = open_update_download()
+        except UpdateDownloadError as error:
+            return self.send_json({"error": str(error)}, 502)
+        filename = re.sub(r"[^A-Za-z0-9._-]+", "-", str(metadata.get("assetName") or "PerfPilot-update.zip"))
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Cache-Control", "no-store")
+            length = response.headers.get("Content-Length")
+            if length and length.isdigit():
+                self.send_header("Content-Length", length)
+            self.end_headers()
+            sent = 0
+            while chunk := response.read(1024 * 256):
+                self.wfile.write(chunk)
+                sent += len(chunk)
+            log.info("[Update] local download complete asset=%s bytes=%s", filename, sent)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as error:
+            log.info("[Update] local download interrupted asset=%s err=%s", filename, error)
+        finally:
+            response.close()
+
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         return json.loads(self.rfile.read(length) or b"{}")
@@ -156,7 +189,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/update":
             from .update import check_for_update
 
-            return self.send_json(check_for_update())
+            payload = check_for_update()
+            # Keep GitHub implementation details inside the local Agent. The
+            # browser only needs the version state and a local download route.
+            payload.pop("downloadUrl", None)
+            payload.pop("releaseUrl", None)
+            return self.send_json(payload)
+        if path == "/api/v1/update/download":
+            return self.stream_update_download()
         if path == "/api/v1/devices":
             query = parse_qs(urlparse(self.path).query)
             connected = registry.refresh(timeout=8) if query.get("fresh") else registry.snapshot()

@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 from . import __version__
 
@@ -20,6 +21,10 @@ UPDATE_CACHE_TTL_SECONDS = 10 * 60
 _cache_lock = threading.Lock()
 _cache_until = 0.0
 _cache_result: dict[str, Any] | None = None
+
+
+class UpdateDownloadError(RuntimeError):
+    """The latest release cannot be downloaded safely."""
 
 
 def _version_key(value: str) -> tuple[int, ...]:
@@ -40,6 +45,29 @@ def _asset_name() -> str:
     machine = platform.machine().lower()
     arch = "arm64" if machine in {"arm64", "aarch64"} else "x86_64"
     return f"PerfPilot-macos-{arch}.dmg"
+
+
+def open_update_download(timeout: float = 60) -> tuple[dict[str, Any], Any]:
+    """Open the verified latest-release asset for streaming to the local UI."""
+    result = check_for_update()
+    if not result.get("ok"):
+        raise UpdateDownloadError(str(result.get("error") or "无法检查更新"))
+    if not result.get("available"):
+        raise UpdateDownloadError("当前没有可下载的新版本")
+    download_url = str(result.get("downloadUrl") or "")
+    parsed = urlparse(download_url)
+    expected_prefix = f"/{REPOSITORY}/releases/download/"
+    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com" or not parsed.path.startswith(expected_prefix):
+        raise UpdateDownloadError("更新包地址无效")
+    request = urllib.request.Request(
+        download_url,
+        headers={"User-Agent": f"PerfPilot/{__version__}", "Accept": "application/octet-stream"},
+    )
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except (OSError, urllib.error.URLError) as error:
+        raise UpdateDownloadError(f"下载更新包失败：{error}") from error
+    return result, response
 
 
 def check_for_update(timeout: float = 5) -> dict[str, Any]:

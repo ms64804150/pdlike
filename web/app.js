@@ -142,13 +142,13 @@ function renderUpdateSettings() {
   $('check-update').addEventListener('click', onUpdateButtonClick);
 }
 
-function onUpdateButtonClick() {
+function legacyDirectDownloadButton() {
   const url = $('check-update')?.dataset.downloadUrl;
   if (url) window.location.assign(url);
   else checkForUpdates();
 }
 
-async function checkForUpdates() {
+async function legacyCheckForUpdatesV2() {
   const button = $('check-update');
   const status = $('update-status');
   const notes = $('update-notes');
@@ -177,7 +177,7 @@ async function checkForUpdates() {
 
 // Keep the update action explicit: download first, then stop and replace the
 // portable folder after Ctrl+C so the running EXE is never overwritten.
-async function checkForUpdates() {
+async function legacyCheckForUpdatesV1() {
   const button = $('check-update');
   const status = $('update-status');
   const notes = $('update-notes');
@@ -204,6 +204,129 @@ async function checkForUpdates() {
     if (status) status.textContent = error.message || '检查更新失败';
   } finally {
     if (button && button.textContent !== '下载更新') button.disabled = false;
+  }
+}
+
+// Final update interaction: show a stable GitHub Release link instead of
+// depending on browser-specific handling of a ZIP download redirect.
+function onUpdateButtonClick() {
+  const releaseUrl = $('check-update')?.dataset.releaseUrl;
+  if (releaseUrl) {
+    window.open(releaseUrl, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  checkForUpdates();
+}
+
+function renderUpdateLink(notes, result) {
+  notes.replaceChildren();
+  const guide = document.createElement('span');
+  guide.className = 'update-guide';
+  guide.textContent = '请点击以下 GitHub Release 地址，在 Assets 区下载 PerfPilot-portable-x64.zip。下载后按 Ctrl+C 关闭当前服务，解压覆盖旧目录并重新启动。';
+  notes.appendChild(guide);
+
+  const link = document.createElement('a');
+  link.className = 'update-release-link';
+  link.href = result.releaseUrl || result.downloadUrl || '';
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = result.releaseUrl || result.downloadUrl || 'GitHub Release';
+  notes.appendChild(link);
+}
+
+async function checkForUpdates() {
+  const button = $('check-update');
+  const status = $('update-status');
+  const notes = $('update-notes');
+  if (button) button.disabled = true;
+  if (status) status.textContent = '正在检查 GitHub Releases…';
+  if (notes) notes.replaceChildren();
+  try {
+    const result = await api('/api/v1/update');
+    if (!result.ok) throw new Error(result.error || '无法检查更新');
+    if (!result.available) {
+      if (status) status.textContent = `当前已是最新版本 v${result.currentVersion}`;
+      return;
+    }
+    if (status) status.textContent = `发现 v${result.latestVersion}，请通过 GitHub Release 下载更新包`;
+    if (notes) renderUpdateLink(notes, result);
+    if (button) {
+      button.textContent = '打开 GitHub Release';
+      button.dataset.releaseUrl = result.releaseUrl || result.downloadUrl || '';
+      button.dataset.downloadUrl = result.downloadUrl || '';
+    }
+  } catch (error) {
+    if (status) status.textContent = error.message || '检查更新失败';
+  } finally {
+    if (button && !button.dataset.releaseUrl) button.disabled = false;
+  }
+}
+
+function renderUpdateDownloadGuide(notes) {
+  notes.replaceChildren();
+  const guide = document.createElement('span');
+  guide.className = 'update-guide';
+  guide.textContent = '下载包将由本机 Agent 获取并保存到浏览器默认下载目录。下载完成后按 Ctrl+C 关闭当前服务，解压覆盖旧目录并重新启动。';
+  notes.appendChild(guide);
+}
+
+async function onUpdateButtonClick() {
+  const button = $('check-update');
+  const status = $('update-status');
+  const assetName = button?.dataset.assetName || 'PerfPilot-portable-x64.zip';
+  if (!button?.dataset.downloadReady) {
+    return checkForUpdates();
+  }
+  button.disabled = true;
+  if (status) status.textContent = '正在下载更新包…';
+  try {
+    const response = await fetch('/api/v1/update/download', { cache: 'no-store' });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || '下载更新包失败');
+    }
+    const blob = await response.blob();
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = href;
+    anchor.download = assetName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 3000);
+    if (status) status.textContent = `已开始下载 ${assetName}，请在浏览器下载列表中查看进度。`;
+  } catch (error) {
+    if (status) status.textContent = error.message || '下载更新包失败';
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function checkForUpdates() {
+  const button = $('check-update');
+  const status = $('update-status');
+  const notes = $('update-notes');
+  if (button) button.disabled = true;
+  if (status) status.textContent = '正在检查更新…';
+  if (notes) notes.replaceChildren();
+  try {
+    const result = await api('/api/v1/update');
+    if (!result.ok) throw new Error(result.error || '无法检查更新');
+    if (!result.available) {
+      if (status) status.textContent = `当前已是最新版本 v${result.currentVersion}`;
+      return;
+    }
+    if (status) status.textContent = `发现新版本 v${result.latestVersion}，可直接下载更新包。`;
+    if (notes) renderUpdateDownloadGuide(notes);
+    if (button) {
+      button.textContent = '下载更新';
+      button.dataset.downloadReady = '1';
+      button.dataset.assetName = result.assetName || 'PerfPilot-portable-x64.zip';
+    }
+  } catch (error) {
+    if (status) status.textContent = error.message || '检查更新失败';
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 

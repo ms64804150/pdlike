@@ -107,6 +107,7 @@ button.event-item{border:0;background:transparent;width:100%;text-align:left;fon
 .stop-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}
 .ghost-button{border:1px solid var(--line);background:#fff;color:var(--ink);padding:10px 16px;border-radius:3px;cursor:pointer;font-weight:700}
 .ghost-button:hover{background:#f7fbf9}
+.update-guide{display:block;margin-top:7px;color:#62747a}.update-release-link{display:block;margin-top:8px;color:#1469b8;font-weight:700;word-break:break-all;text-decoration:underline}.update-release-link:hover{color:#c7543b}
 .connection-help{margin:12px auto 0;max-width:360px;text-align:left;line-height:1.6;color:var(--ink)}
 .connection-help p{margin:6px 0}
 .connection-help .ghost-button{margin-top:8px;font-size:12px}
