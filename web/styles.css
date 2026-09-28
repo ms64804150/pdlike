@@ -90,6 +90,7 @@ button.event-item{border:0;background:transparent;width:100%;text-align:left;fon
 #fps-detail-chart,#cpu-detail-chart,#mem-detail-chart,#gpu-detail-chart,#net-detail-chart{cursor:crosshair}
 @media(max-width:760px){.detail-stats{grid-template-columns:1fr}}
 .report-list{display:grid;gap:10px}.report-row{display:flex;justify-content:space-between;align-items:center;gap:18px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;box-shadow:var(--shadow)}.report-row b,.report-row small{display:block}.report-row small{color:var(--muted);margin-top:6px}.report-row-meta{display:flex;align-items:center;gap:14px;color:var(--muted);font-size:12px}.report-row-meta em{font-style:normal;color:#b27b42}@media(max-width:650px){.report-row{align-items:flex-start;flex-direction:column}.report-row-meta{width:100%;justify-content:space-between}}
+.report-list-summary{color:var(--muted);font:12px var(--mono);padding:3px 2px}.report-pagination{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:8px 0 2px;color:var(--muted);font:12px var(--mono)}.report-pagination .ghost-button{padding:7px 12px;font-size:12px}.report-pagination .ghost-button:disabled{opacity:.45;cursor:not-allowed}@media(max-width:650px){.report-pagination{justify-content:space-between}}
 .app-dialog{position:fixed;inset:0;z-index:9999;display:grid;place-items:center;background:rgba(23,37,43,.45);padding:24px}
 .app-dialog[hidden]{display:none!important}
 .app-dialog-card{background:#fff;border-radius:12px;box-shadow:0 24px 60px rgba(23,37,43,.2);max-width:420px;width:100%;padding:28px 26px 22px}
@@ -120,3 +121,4 @@ button.event-item{border:0;background:transparent;width:100%;text-align:left;fon
 .hero-guide h2{margin:0 0 10px;font-size:24px;line-height:1.2}
 .hero-instructions{display:grid;gap:5px;margin:0;padding-left:28px;color:#294b47;line-height:1.45}
 .hero-instructions li::marker{color:var(--coral);font-family:var(--mono);font-weight:700}
+.update-indicator{display:block;margin:7px 0 0;padding:4px 7px;border:1px solid rgba(237,119,95,.75);border-radius:4px;background:rgba(237,119,95,.16);color:#ffd6cb;font:700 10px var(--sans);cursor:pointer;text-align:left;line-height:1.35}.update-indicator:hover{background:rgba(237,119,95,.28);color:#fff}.update-indicator[hidden]{display:none}

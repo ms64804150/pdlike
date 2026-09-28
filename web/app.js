@@ -19,6 +19,8 @@ const state = {
   memoryScale: 'delta',
   chartWindow: 'recent',
   uiHeartbeat: null,
+  reportPage: 1,
+  updateResult: null,
 };
 const $ = (id) => document.getElementById(id);
 
@@ -270,6 +272,60 @@ function renderUpdateDownloadGuide(notes) {
   notes.appendChild(guide);
 }
 
+function updateSidebarIndicator(result) {
+  state.updateResult = result || null;
+  const versionNode = document.querySelector('.agent-status small');
+  if (!versionNode) return;
+  let indicator = $('update-indicator');
+  if (!indicator) {
+    indicator = document.createElement('button');
+    indicator.id = 'update-indicator';
+    indicator.type = 'button';
+    indicator.className = 'update-indicator';
+    indicator.addEventListener('click', () => {
+      setView('settings');
+      if (state.updateResult && state.updateResult.available) displayUpdateResult(state.updateResult);
+      else checkForUpdates();
+    });
+    versionNode.after(indicator);
+  }
+  if (!result || !result.available) {
+    indicator.hidden = true;
+    indicator.textContent = '';
+    return;
+  }
+  indicator.hidden = false;
+  indicator.textContent = '有新版本 v' + result.latestVersion + ' · 点击更新';
+}
+
+function displayUpdateResult(result) {
+  updateSidebarIndicator(result);
+  const button = $('check-update');
+  const status = $('update-status');
+  const notes = $('update-notes');
+  if (!button) return;
+  if (!result.available) {
+    if (status) status.textContent = '当前已是最新版本 v' + result.currentVersion;
+    if (notes) notes.replaceChildren();
+    button.textContent = '检查更新';
+    delete button.dataset.downloadReady;
+    delete button.dataset.assetName;
+    return;
+  }
+  if (status) status.textContent = '发现新版本 v' + result.latestVersion + '，可直接下载更新包。';
+  if (notes) renderUpdateDownloadGuide(notes);
+  button.textContent = '下载更新';
+  button.dataset.downloadReady = '1';
+  button.dataset.assetName = result.assetName || 'PerfPilot-portable-x64.zip';
+}
+
+async function refreshUpdateIndicator() {
+  try {
+    const result = await api('/api/v1/update');
+    if (result.ok) updateSidebarIndicator(result);
+  } catch (error) { /* 后台检查失败不干扰正常使用 */ }
+}
+
 async function onUpdateButtonClick() {
   const button = $('check-update');
   const status = $('update-status');
@@ -285,7 +341,29 @@ async function onUpdateButtonClick() {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload.error || '下载更新包失败');
     }
-    const blob = await response.blob();
+    const total = Number(response.headers.get('Content-Length')) || 0;
+    const reader = response.body?.getReader();
+    const chunks = [];
+    let received = 0;
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        chunks.push(value);
+        received += value.byteLength;
+        if (status) {
+          const receivedMb = (received / 1024 / 1024).toFixed(1);
+          const totalMb = total ? (total / 1024 / 1024).toFixed(1) : '';
+          const percent = total ? ` · ${Math.min(100, received / total * 100).toFixed(0)}%` : '';
+          status.textContent = `正在下载更新包：${receivedMb}${totalMb ? ` / ${totalMb} MB` : ' MB'}${percent}`;
+        }
+      }
+    } else {
+      chunks.push(await response.arrayBuffer());
+      received = chunks[0].byteLength;
+    }
+    const blob = new Blob(chunks, { type: response.headers.get('Content-Type') || 'application/zip' });
     const href = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = href;
@@ -294,7 +372,7 @@ async function onUpdateButtonClick() {
     anchor.click();
     anchor.remove();
     setTimeout(() => URL.revokeObjectURL(href), 3000);
-    if (status) status.textContent = `已开始下载 ${assetName}，请在浏览器下载列表中查看进度。`;
+    if (status) status.textContent = `下载完成：${assetName}（${(received / 1024 / 1024).toFixed(1)} MB）`;
   } catch (error) {
     if (status) status.textContent = error.message || '下载更新包失败';
   } finally {
@@ -312,17 +390,7 @@ async function checkForUpdates() {
   try {
     const result = await api('/api/v1/update');
     if (!result.ok) throw new Error(result.error || '无法检查更新');
-    if (!result.available) {
-      if (status) status.textContent = `当前已是最新版本 v${result.currentVersion}`;
-      return;
-    }
-    if (status) status.textContent = `发现新版本 v${result.latestVersion}，可直接下载更新包。`;
-    if (notes) renderUpdateDownloadGuide(notes);
-    if (button) {
-      button.textContent = '下载更新';
-      button.dataset.downloadReady = '1';
-      button.dataset.assetName = result.assetName || 'PerfPilot-portable-x64.zip';
-    }
+    displayUpdateResult(result);
   } catch (error) {
     if (status) status.textContent = error.message || '检查更新失败';
   } finally {
@@ -2270,6 +2338,50 @@ async function renderReports() {
   }
 }
 
+const REPORTS_PER_PAGE = 10;
+
+function reportRowMarkup(report) {
+  const date = new Date((report.createdAt || report.startedAtMs / 1000 || 0) * 1000).toLocaleString();
+  const status = report.reportReady ? '报告可用' : report.reportRecoverable ? '可生成报告' : `记录已保存 · ${report.error || '报告不可用'}`;
+  const runId = report.runId || report.sessionId;
+  return `<article class="report-row"><div><b>${escapeHtml(reportListTitle(report))}</b><small>${escapeHtml(report.bundle || report.packageId || '未知应用')} · ${date}</small></div><div class="report-row-meta"><span>${status}</span>${report.reportReady || report.reportRecoverable ? `<a class="secondary-button report-open" href="/api/v1/runs/${encodeURIComponent(runId)}/report" target="_blank" rel="noopener">${report.reportReady ? '打开报告' : '生成并打开'}</a>` : '<em>无 HTML 报告</em>'}</div></article>`;
+}
+
+async function renderReports() {
+  const container = $('report-list');
+  if (!container) return;
+  container.innerHTML = '<div class="empty-state">正在加载报告记录…</div>';
+  try {
+    const result = await api('/api/v1/reports');
+    const reports = Array.isArray(result.reports) ? result.reports : [];
+    if (!reports.length) {
+      state.reportPage = 1;
+      container.innerHTML = '<div class="empty-state">暂无历史报告</div>';
+      return;
+    }
+    const totalPages = Math.ceil(reports.length / REPORTS_PER_PAGE);
+    state.reportPage = Math.min(Math.max(state.reportPage || 1, 1), totalPages);
+    const start = (state.reportPage - 1) * REPORTS_PER_PAGE;
+    const visible = reports.slice(start, start + REPORTS_PER_PAGE);
+    container.innerHTML = `
+      <div class="report-list-summary">共 ${reports.length} 条检测记录 · 第 ${state.reportPage} / ${totalPages} 页</div>
+      ${visible.map(reportRowMarkup).join('')}
+      <nav class="report-pagination" aria-label="检测报告分页">
+        <button type="button" class="ghost-button" data-report-page="prev" ${state.reportPage === 1 ? 'disabled' : ''}>上一页</button>
+        <span>第 ${state.reportPage} / ${totalPages} 页</span>
+        <button type="button" class="ghost-button" data-report-page="next" ${state.reportPage === totalPages ? 'disabled' : ''}>下一页</button>
+      </nav>`;
+    container.querySelectorAll('[data-report-page]').forEach((button) => {
+      button.addEventListener('click', () => {
+        state.reportPage += button.dataset.reportPage === 'next' ? 1 : -1;
+        renderReports();
+      });
+    });
+  } catch (error) {
+    container.innerHTML = `<div class="empty-state">${escapeHtml(error.message || '读取报告失败')}</div>`;
+  }
+}
+
 function deviceLabel(session) {
   const device = (session && session.device) || {};
   return device.name || device.model || device.id || '该设备';
@@ -2495,6 +2607,7 @@ async function load() {
     if ($('data-dir')) $('data-dir').textContent = agent.dataDir || '';
   } catch (error) { /* ignore */ }
   await restoreRuns();
+  refreshUpdateIndicator();
 }
 
 async function refreshData() {
