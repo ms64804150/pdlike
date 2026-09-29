@@ -3,6 +3,7 @@ const state = {
   device: null,
   apps: [],
   appsError: '',
+  appsLoading: false,
   adbRecovering: false,
   adbRecoveryStatus: '',
   app: null,
@@ -461,6 +462,7 @@ function paintDeviceList() {
     state.capabilities = [];
     state.apps = [];
     state.appsError = '';
+    state.appsLoading = false;
     state.selectGen++;
       $('app-list').innerHTML = '<div class="empty-state">先选择一个设备</div>';
       $('capability-list').innerHTML = '';
@@ -572,29 +574,60 @@ async function selectDevice(id) {
   const gen = ++state.selectGen;
   const tag = device.platform === 'ios' ? '[IosApps]' : '[AndroidApps]';
   console.info(`${tag} select start`, { id, platform: device.platform, gen });
-  const previousBundle = state.selectedBundle || (state.app && state.app.bundle);
+  const switchingDevice = !state.device || state.device.id !== id;
+  const previousBundle = switchingDevice ? null : (state.selectedBundle || (state.app && state.app.bundle));
   state.device = device;
+  if (switchingDevice) {
+    state.apps = [];
+    state.appsError = '';
+    state.appsLoading = true;
+    state.selectedBundle = null;
+    state.app = null;
+    state.capabilities = [];
+    $('capability-list').innerHTML = '';
+    renderApps();
+    updateStartButton();
+  }
   document.querySelectorAll('#device-list .device-card').forEach((card) => card.classList.toggle('selected', card.dataset.device === id));
   $('connection-pill').textContent = `${state.device.name} · Agent 已连接`;
   $('connection-pill').className = 'pill';
   $('connection-pill').style.background = '';
   $('connection-pill').style.color = '';
   try {
-    const result = await api(`/api/v1/devices/${encodeURIComponent(id)}/applications?platform=${encodeURIComponent(device.platform || 'android')}`);
+    const applicationsRequest = api(`/api/v1/devices/${encodeURIComponent(id)}/applications?platform=${encodeURIComponent(device.platform || 'android')}`);
+    const foregroundRequest = device.platform === 'android'
+      ? api(`/api/v1/devices/${encodeURIComponent(id)}/foreground`).catch(() => null)
+      : Promise.resolve(null);
+    const [result, foreground] = await Promise.all([applicationsRequest, foregroundRequest]);
     if (gen !== state.selectGen || (state.device && state.device.id !== id)) {
       console.info(`${tag} select stale skip`, { id, gen, current: state.selectGen });
       return;
     }
-    state.apps = result.applications || [];
+    const foregroundBundle = foreground && foreground.package;
+    const apps = result.applications || [];
+    state.apps = foregroundBundle
+      ? [...apps].sort((left, right) => {
+        const leftForeground = left.bundle === foregroundBundle ? 1 : 0;
+        const rightForeground = right.bundle === foregroundBundle ? 1 : 0;
+        return rightForeground - leftForeground;
+      })
+      : apps;
     state.appsError = result.error || '';
-    console.info(`${tag} select done`, { id, count: state.apps.length, error: state.appsError || null });
+    console.info(`${tag} select done`, {
+      id,
+      count: state.apps.length,
+      foreground: foregroundBundle || null,
+      error: state.appsError || null,
+    });
   } catch (error) {
     if (gen !== state.selectGen) return;
     const text = error.message || '读取应用列表失败';
     console.error(`${tag} select failed`, { id, err: text });
-    if (!state.apps.length) state.appsError = text;
+    state.appsError = text;
     $('connection-pill').textContent = text;
     $('connection-pill').className = 'pill muted';
+  } finally {
+    if (gen === state.selectGen && state.device && state.device.id === id) state.appsLoading = false;
   }
   renderApps();
   const restore = state.selectedBundle || previousBundle;
@@ -639,6 +672,10 @@ function reportListTitle(report) {
 }
 
 function renderApps() {
+  if (state.appsLoading) {
+    $('app-list').innerHTML = '<div class="empty-state">正在获取应用列表…</div>';
+    return;
+  }
   const rawQuery = $('app-search') ? $('app-search').value : '';
   const query = String(rawQuery || '').trim().toLowerCase();
   const matched = query
@@ -770,6 +807,10 @@ function resetMetricDisplay(session) {
     if (context) context.clearRect(0, 0, canvas.width, canvas.height);
     canvas._chartMeta = null;
   });
+  // The timeline inspector is shared by all monitor tabs. Clear it whenever
+  // the active session has no sample, otherwise the previous device's
+  // time-point values remain visible while the next device is loading.
+  renderInspectPanel(session, null);
   drawCharts([], (session && session.extras) || {}, inspectMarkerTime(session, []));
 }
 
