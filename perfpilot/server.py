@@ -30,15 +30,17 @@ _adb_restart_lock = threading.Lock()
 
 
 class UiLifecycle:
-    """Track browser clients without controlling the local Agent lifetime."""
+    """Track browser clients and close the local Agent after the last page exits."""
 
-    reconnect_grace_seconds = 5
+    reconnect_grace_seconds = 3
     heartbeat_timeout_seconds = 30
 
-    def __init__(self) -> None:
+    def __init__(self, on_empty: Any = None) -> None:
         self._clients: dict[str, float] = {}
         self._seen_client = False
         self._closed = False
+        self._on_empty = on_empty
+        self._empty_handled = False
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
 
@@ -80,6 +82,7 @@ class UiLifecycle:
         self._timer.start()
 
     def _expire_clients(self) -> None:
+        on_empty = None
         with self._lock:
             if self._closed:
                 return
@@ -91,6 +94,14 @@ class UiLifecycle:
             }
             if self._clients:
                 self._schedule_locked(self.heartbeat_timeout_seconds)
+            elif self._seen_client and not self._empty_handled:
+                self._empty_handled = True
+                on_empty = self._on_empty
+        if on_empty:
+            try:
+                on_empty()
+            except Exception:
+                get_logger("http").exception("[UI] empty-client shutdown callback failed")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -548,7 +559,51 @@ class AgentHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.ui_lifecycle = UiLifecycle()
+        self._ui_shutdown_lock = threading.Lock()
+        self._ui_shutdown_started = False
+        self.ui_lifecycle = UiLifecycle(on_empty=self._on_ui_empty)
+
+    def _on_ui_empty(self) -> None:
+        """Stop active Runs, let them write reports, then exit the Agent.
+
+        This is called after the last browser client has disappeared and the
+        reconnect grace period has elapsed.  It runs in a background thread so
+        the HTTP server can continue serving final status/report requests while
+        the collector finishes.
+        """
+        with self._ui_shutdown_lock:
+            if self._ui_shutdown_started:
+                return
+            self._ui_shutdown_started = True
+        log = get_logger("http")
+        log.info("[UI] last browser client left; stopping active runs")
+        for run in manager.active():
+            run_id = str(run.get("runId") or "")
+            if run_id:
+                try:
+                    manager.stop(run_id, save=True, report=True)
+                    log.info("[StopMonitor] browser closed runId=%s save=True report=True", run_id)
+                except Exception:
+                    log.exception("[StopMonitor] browser-close stop failed runId=%s", run_id)
+        threading.Thread(
+            target=self._finish_ui_shutdown,
+            name="ui-close-shutdown",
+            daemon=True,
+        ).start()
+
+    def _finish_ui_shutdown(self) -> None:
+        log = get_logger("http")
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            active = manager.active()
+            if not active:
+                break
+            time.sleep(0.2)
+        if manager.active():
+            log.warning("[UI] report finalization timed out; forcing Agent shutdown")
+        log.info("[UI] reports finalized; ADB/Agent shutdown in 3 seconds")
+        time.sleep(3)
+        self.shutdown()
 
     def server_bind(self) -> None:
         if os.name == "nt":

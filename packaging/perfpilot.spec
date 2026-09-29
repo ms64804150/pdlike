@@ -201,7 +201,7 @@ if IS_MACOS:
         bundle_identifier="com.perfpilot.agent",
         info_plist={
             "CFBundleDisplayName": "PerfPilot",
-            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleShortVersionString": "1.0.1",
             "NSHighResolutionCapable": True,
         },
     )
