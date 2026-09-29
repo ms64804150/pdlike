@@ -2388,7 +2388,7 @@ async function renderReports() {
       const date = new Date((report.createdAt || report.startedAtMs / 1000 || 0) * 1000).toLocaleString();
       const status = report.reportReady ? '报告可用' : report.reportRecoverable ? '可生成报告' : `记录已保存 · ${report.error || '报告不可用'}`;
       const runId = report.runId || report.sessionId;
-      return `<article class="report-row"><div><b>${escapeHtml(reportListTitle(report))}</b><small>${escapeHtml(report.bundle || report.packageId || '未知应用')} · ${date}</small></div><div class="report-row-meta"><span>${status}</span>${report.reportReady || report.reportRecoverable ? `<a class="secondary-button report-open" href="/api/v1/runs/${encodeURIComponent(runId)}/report" target="_blank" rel="noopener">${report.reportReady ? '打开报告' : '生成并打开'}</a>` : '<em>无 HTML 报告</em>'}</div></article>`;
+      return `<article class="report-row"><div><b>${escapeHtml(reportListTitle(report))}</b><small>${escapeHtml(report.bundle || report.packageId || '未知应用')} · ${date}</small></div><div class="report-row-meta"><span>${status}</span>${report.reportReady || report.reportRecoverable ? `<a class="secondary-button report-open" href="/api/v1/runs/${encodeURIComponent(runId)}/report" target="_blank" rel="noopener">${report.reportReady ? '打开报告' : '生成并打开'}</a><a class="secondary-button report-pdf" href="/api/v1/runs/${encodeURIComponent(runId)}/report?print=1" target="_blank" rel="noopener">导出 PDF</a>` : '<em>无 HTML 报告</em>'}</div></article>`;
     }).join('');
   } catch (error) {
     container.innerHTML = `<div class="empty-state">${error.message}</div>`;
@@ -2412,7 +2412,7 @@ function reportRowMarkup(report) {
   const status = reportStatusText(report);
   const runId = report.runId || report.sessionId;
   const reportAction = report.reportReady || report.reportRecoverable
-    ? '<a class="secondary-button report-open" href="/api/v1/runs/' + encodeURIComponent(runId) + '/report" target="_blank" rel="noopener">' + (report.reportReady ? '打开报告' : '生成并打开') + '</a>'
+    ? '<a class="secondary-button report-open" href="/api/v1/runs/' + encodeURIComponent(runId) + '/report" target="_blank" rel="noopener">' + (report.reportReady ? '打开报告' : '生成并打开') + '</a><a class="secondary-button report-pdf" href="/api/v1/runs/' + encodeURIComponent(runId) + '/report?print=1" target="_blank" rel="noopener">导出 PDF</a>'
     : report.status === 'running' || report.status === 'ready' || report.status === 'finalizing'
       ? '<em>完成后可生成报告</em>'
       : '<em>无 HTML 报告</em>';

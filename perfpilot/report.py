@@ -943,6 +943,21 @@ def render_report(meta: dict[str, Any], samples: list[dict[str, Any]]) -> str:
         has_swap,
     )
 
+    print_script = """
+<script>
+(function () {
+  var button = document.getElementById('print-report');
+  if (button) button.addEventListener('click', function () { window.print(); });
+  var params = new URLSearchParams(window.location.search);
+  if (params.get('print') === '1') {
+    window.addEventListener('load', function () {
+      window.setTimeout(function () { window.print(); }, 350);
+    });
+  }
+})();
+</script>
+"""
+
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>{html.escape(title)}</title>
 <style>
@@ -1013,10 +1028,27 @@ th,td{{border-bottom:1px solid #e6eeeb;padding:8px 10px;text-align:left;font-siz
 th{{position:sticky;top:0;background:#f7fbf9;font:500 10px var(--mono);letter-spacing:.4px;color:var(--muted)}}
 td.mono{{font-family:var(--mono);font-size:11px}}
 .hint{{color:var(--muted);font-size:12px;line-height:1.6;margin:8px 0 0}}
+.report-toolbar{{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin:-8px 0 18px}}
+.report-toolbar button{{border:1px solid var(--line);background:#fff;color:var(--ink);padding:9px 14px;border-radius:4px;cursor:pointer;font-weight:600}}
+.report-toolbar button:hover{{border-color:var(--green);background:#f2fbf5}}
+@page{{size:A4;margin:12mm}}
+@media print{{
+  body{{background:#fff;font-size:11px;-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+  .wrap{{max-width:none;padding:0}}
+  .report-toolbar,.chart-actions,.inspect-live-btn{{display:none!important}}
+  .chart-card,.metric-card,.table-card,.timeline-inspect{{box-shadow:none;break-inside:avoid}}
+  .detail-grid,.metric-grid,.chart-grid{{gap:8px;margin-bottom:8px}}
+  .chart-card{{padding:12px 14px}}
+  .metric-card{{padding:12px 14px}}
+  .table-wrap{{max-height:none;overflow:visible}}
+  svg.report-chart{{width:100%;height:auto}}
+  tr{{break-inside:avoid}}
+}}
 @media(max-width:900px){{.metric-grid,.chart-grid,.detail-grid{{grid-template-columns:1fr}}.memory-chart{{grid-column:auto}}}}
 </style></head><body>
 <div class="wrap">
 <p class="eyebrow">PERFORMANCE LAB / SESSION REPORT</p>
+<div class="report-toolbar"><button type="button" id="print-report">导出 PDF</button></div>
 <h1>{html.escape(title)}</h1>
 <p class="meta"><span>{html.escape(app_name)}</span><span>{html.escape(app_version)}</span>
 <span>{html.escape(device_model)}</span><span>{html.escape(bundle)}</span>
@@ -1066,4 +1098,4 @@ td.mono{{font-family:var(--mono);font-size:11px}}
 <tbody>{''.join(rows) or f'<tr><td colspan="{colspan}">无样本</td></tr>'}</tbody></table></div>
 </section>
 </div>
-""" + _inspect_script(inspect_payload) + "</body></html>"
+""" + print_script + _inspect_script(inspect_payload) + "</body></html>"
