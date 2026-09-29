@@ -605,13 +605,9 @@ async function selectDevice(id) {
     }
     const foregroundBundle = foreground && foreground.package;
     const apps = result.applications || [];
-    state.apps = foregroundBundle
-      ? [...apps].sort((left, right) => {
-        const leftForeground = left.bundle === foregroundBundle ? 1 : 0;
-        const rightForeground = right.bundle === foregroundBundle ? 1 : 0;
-        return rightForeground - leftForeground;
-      })
-      : apps;
+    state.apps = apps
+      .map((app) => ({ ...app, isForeground: Boolean(foregroundBundle && app.bundle === foregroundBundle) }))
+      .sort((left, right) => Number(right.isForeground) - Number(left.isForeground));
     state.appsError = result.error || '';
     console.info(`${tag} select done`, {
       id,
@@ -692,7 +688,7 @@ function renderApps() {
   if (!state.apps.length && !state.device) emptyCopy = '先选择一个设备';
   else if (query && !apps.length && state.apps.length) emptyCopy = '没有匹配该包名的应用';
   $('app-list').innerHTML = apps.length
-    ? apps.map((app) => `<label class="app-row"><input type="radio" name="app" value="${escapeHtml(app.bundle)}" ${state.selectedBundle === app.bundle ? 'checked' : ''}><div><strong>${escapeHtml(app.name)}</strong><small>${escapeHtml(app.bundle)} · ${escapeHtml(appVersionText(app) || '版本未知')}</small></div></label>`).join('')
+    ? apps.map((app) => `<label class="app-row"><input type="radio" name="app" value="${escapeHtml(app.bundle)}" ${state.selectedBundle === app.bundle ? 'checked' : ''}><div class="app-row-copy"><strong>${escapeHtml(app.name)}${app.isForeground ? '<span class="app-foreground-badge">前台</span>' : ''}</strong><small>${escapeHtml(app.bundle)} · ${escapeHtml(appVersionText(app) || '版本未知')}</small></div></label>`).join('')
     : `<div class="empty-state">${escapeHtml(emptyCopy)}${state.device?.platform === 'android' && state.devices.some((device) => device.id === state.device.id) && !query ? androidRecoveryHelp() : ''}</div>`;
   document.querySelectorAll('input[name="app"]').forEach((input) => input.addEventListener('change', () => selectApp(input.value)));
 }
