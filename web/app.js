@@ -24,6 +24,8 @@ const state = {
   updateResult: null,
 };
 const $ = (id) => document.getElementById(id);
+const powerChartNames = ['temp', 'level', 'power', 'energy', 'estimated'];
+const powerChartIds = ['bat', 'overview-bat'].flatMap((prefix) => powerChartNames.map((name) => `${prefix}-${name}-chart`));
 
 const uiClientId = (() => {
   const key = 'perfpilot-ui-client-id';
@@ -796,7 +798,7 @@ function resetMetricDisplay(session) {
     const node = $(id);
     if (node) node.textContent = '--';
   });
-  ['fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart', 'bat-temp-chart', 'bat-level-chart', 'bat-power-chart'].forEach((id) => {
+  ['fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart', ...powerChartIds].forEach((id) => {
     const canvas = $(id);
     if (!canvas) return;
     const context = canvas.getContext('2d');
@@ -1382,7 +1384,7 @@ function metricSource(session, id) {
 }
 
 function metricInterval(id) {
-  const intervals = { fps: '1s 窗口', cpu: '1s', memory: '约 1s', gpu: '1s', network: '—', battery: '电池约 5s，温控 / 耗电统计约 30s', logs: '实时' };
+  const intervals = { fps: '1s 窗口', cpu: '1s', memory: '约 1s', gpu: '1s', network: '—', battery: '温度 / 电池 / 耗电统计均约 30s', logs: '实时' };
   return intervals[id] || '1s';
 }
 
@@ -1494,6 +1496,7 @@ function renderCollectorLog(lines) {
 
 function updateBatteryPane(session, sample) {
   const android = session && session.device && session.device.platform === 'android';
+  if ($('power-overview')) $('power-overview').hidden = !android;
   const metrics = [
     ['bat-level-detail', 'batteryLevelPct', '%'],
     ['bat-temp-detail', 'batteryTemperatureC', ' °C'],
@@ -1531,7 +1534,7 @@ function updateBatteryPane(session, sample) {
   if ($('bat-availability')) {
     const age = (key) => Number.isFinite(sample && sample[key]) ? `${sample[key].toFixed(1)}s` : '--';
     $('bat-availability').textContent = android
-      ? `数据年龄：电池 ${age('batterySampleAgeSec')} / 温控 ${age('thermalSampleAgeSec')} / 耗电统计 ${age('batteryStatsAgeSec')}。电池超过 15s、温控和统计超过 90s 后不再展示旧值；缺失或权限受限显示不可用。`
+      ? `数据年龄：电池 ${age('batterySampleAgeSec')} / 温控 ${age('thermalSampleAgeSec')} / 耗电统计 ${age('batteryStatsAgeSec')}。均约 30s 采集，超过 90s 后不再展示旧值；缺失或权限受限显示不可用。`
       : 'iOS 暂不采集温度、电池及功耗。';
   }
 }
@@ -1609,6 +1612,35 @@ function updateDetailPane(session, sample) {
   if (tab !== 'overview' && tab !== 'logs') drawDetailCharts(session, nums);
 }
 
+function drawPowerCharts(samples, prefix, markerTime) {
+  const visible = visibleChartData(samples);
+  const list = visible.samples;
+  const times = visible.times;
+  const marker = markerTime != null && markerTime >= (times[0] ?? 0) && markerTime <= (times.at(-1) ?? 0) ? markerTime : null;
+  const thermalSeries = [
+    ['batteryTemperatureC', '#ed775f', '电池'],
+    ['cpuTemperatureC', '#5f91d3', 'CPU'],
+    ['gpuTemperatureC', '#6b5ce7', 'GPU'],
+    ['skinTemperatureC', '#2c9b6d', '机身'],
+  ].map(([key, color, label]) => ({ values: list.map((item) => item[key]), color, label }));
+  for (const [name, series, unit, fixedMax] of [
+    ['temp', thermalSeries, '°C', null],
+    ['level', [{ values: list.map((item) => item.batteryLevelPct), color: '#2c9b6d', label: '电量' }], '%', 100],
+    ['power', [{ values: list.map((item) => item.batteryPowerMw), color: '#e6a84a', label: '电池侧功率' }], 'mW', null],
+    ['energy', [{ values: list.map((item) => item.dischargeEnergyMwh), color: '#ed775f', label: '放电能量' }], 'mWh', null],
+    ['estimated', [
+      { values: list.map((item) => item.deviceEstimatedMah), color: '#5f91d3', label: '整机累计' },
+      { values: list.map((item) => item.appEstimatedMah), color: '#6b5ce7', label: '目标 UID 累计' },
+    ], 'mAh', null],
+  ]) {
+    const values = series.flatMap((item) => item.values).filter(Number.isFinite);
+    const yMin = values.reduce((minimum, value) => Math.min(minimum, value), 0);
+    const yMax = fixedMax || values.reduce((maximum, value) => Math.max(maximum, value), 10) * 1.1;
+    const canvas = $(`${prefix}-${name}-chart`);
+    if (canvas) drawChart(canvas, { series, times, yMin, yMax, ySuffix: unit, markerTime: marker });
+  }
+}
+
 function drawDetailCharts(session, samples) {
   const extras = (session && session.extras) || {};
   const visible = visibleChartData(samples);
@@ -1620,22 +1652,7 @@ function drawDetailCharts(session, samples) {
     : null;
   const tab = (session && session.metricTab) || state.metricTab || 'overview';
   if (tab === 'battery') {
-    const thermalSeries = [
-      ['batteryTemperatureC', '#ed775f', '电池'],
-      ['cpuTemperatureC', '#5f91d3', 'CPU'],
-      ['gpuTemperatureC', '#6b5ce7', 'GPU'],
-      ['skinTemperatureC', '#2c9b6d', '机身'],
-    ].map(([key, color, label]) => ({ values: list.map((item) => item[key]), color, label }));
-    for (const [id, series, unit, fixedMax] of [
-      ['bat-temp-chart', thermalSeries, '°C', null],
-      ['bat-level-chart', [{ values: list.map((item) => item.batteryLevelPct), color: '#2c9b6d', label: '电量' }], '%', 100],
-      ['bat-power-chart', [{ values: list.map((item) => item.batteryPowerMw), color: '#e6a84a', label: '电池侧功率' }], 'mW', null],
-    ]) {
-      const values = series.flatMap((item) => item.values).filter(Number.isFinite);
-      const yMin = Math.min(0, ...values);
-      const yMax = fixedMax || Math.max(10, ...values) * 1.1;
-      if ($(id)) drawChart($(id), { series, times, yMin, yMax, ySuffix: unit, markerTime: marker });
-    }
+    drawPowerCharts(samples, 'bat', selectedMarker);
   }
   if (tab === 'cpu' && $('cpu-detail-chart')) {
     const cpuValues = list.map((item) => item.cpu);
@@ -1774,6 +1791,18 @@ function renderInspectPanel(session, sample) {
   $('inspect-cpu').textContent = fmtInspectValue(sample.cpu, '%', '--');
   $('inspect-memory').textContent = fmtInspectValue(sample.memory, ' MB', '--');
   $('inspect-gpu').textContent = fmtInspectValue(sample.gpu, '%', '不支持');
+  document.querySelectorAll('[data-power-inspect]').forEach((cell) => {
+    cell.hidden = session.device?.platform !== 'android';
+  });
+  for (const [id, key, unit] of [
+    ['inspect-battery-temp', 'batteryTemperatureC', ' °C'],
+    ['inspect-battery-level', 'batteryLevelPct', '%'],
+    ['inspect-battery-power', 'batteryPowerMw', ' mW'],
+    ['inspect-battery-energy', 'dischargeEnergyMwh', ' mWh'],
+    ['inspect-battery-estimated', 'appEstimatedMah', ' mAh'],
+  ]) {
+    if ($(id)) $(id).textContent = fmtInspectValue(sample[key], unit, '不可用');
+  }
   const down = Number.isFinite(sample.networkDown) ? sample.networkDown : sample.networkDownMiB;
   const up = Number.isFinite(sample.networkUp) ? sample.networkUp : sample.networkUpMiB;
   $('inspect-network').textContent = Number.isFinite(down) || Number.isFinite(up)
@@ -2356,6 +2385,7 @@ function drawChart(canvas, options) {
 }
 
 function drawCharts(samples, extras, markerTime) {
+  if (activeSession()?.device?.platform === 'android') drawPowerCharts(samples, 'overview-bat', markerTime);
   const visible = visibleChartData(samples);
   const list = visible.samples;
   const flags = extras || {};
@@ -2831,7 +2861,7 @@ on('metric-subtabs', 'click', (event) => {
   const button = event.target.closest('.metric-subtab');
   if (button && button.dataset.metric) setMetricTab(button.dataset.metric);
 });
-['fps-chart', 'resource-chart', 'memory-chart', 'fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart', 'bat-temp-chart', 'bat-level-chart', 'bat-power-chart'].forEach((id) => {
+['fps-chart', 'resource-chart', 'memory-chart', 'fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart', ...powerChartIds].forEach((id) => {
   const canvas = $(id);
   if (!canvas) return;
   canvas.addEventListener('click', onChartClick);

@@ -55,11 +55,26 @@
             <div id="inspect-swap-cell" hidden><small>Swap PSS</small><b id="inspect-swap">--</b></div>
             <div><small>GPU</small><b id="inspect-gpu">不支持</b></div>
             <div><small>Network</small><b id="inspect-network">不支持</b></div>
+            <div data-power-inspect hidden><small>电池温度</small><b id="inspect-battery-temp">--</b></div>
+            <div data-power-inspect hidden><small>电量</small><b id="inspect-battery-level">--</b></div>
+            <div data-power-inspect hidden><small>电池侧功率</small><b id="inspect-battery-power">--</b></div>
+            <div data-power-inspect hidden><small>会话放电能量</small><b id="inspect-battery-energy">--</b></div>
+            <div data-power-inspect hidden><small>目标 UID 累计耗电</small><b id="inspect-battery-estimated">--</b></div>
           </div>
         </aside>
         <div id="metric-pane-overview" class="metric-pane">
         <div class="metric-grid"><article class="metric-card fps-card"><div class="metric-label"><span>FPS</span><em class="quality available">LIVE</em></div><strong id="fps-value">--</strong><small>当前帧率 · 平滑窗口</small><div class="metric-foot"><span>平均 <b id="fps-average">--</b></span><span>最低 <b id="fps-min">--</b></span><span>状态 <b class="good">流畅</b></span></div></article><article class="metric-card"><div class="metric-label"><span>APP CPU</span><em class="quality available">AVAILABLE</em></div><strong id="cpu-value">--</strong><small>目标进程 CPU 占用</small><div class="mini-track"><i id="cpu-bar"></i></div><div class="metric-foot"><span>≤25% 概率 <b id="cpu-le25">--</b></span><span>≤50% 概率 <b id="cpu-le50">--</b></span></div></article><article class="metric-card memory-card"><div class="metric-label"><span>MEMORY</span><em class="quality available">PSS</em></div><strong id="memory-value" class="mem-total">--</strong><small>目标进程 TOTAL PSS</small><div class="memory-extras"><label class="mem-opt"><input type="checkbox" id="opt-native-pss" checked><span class="swatch native"></span>Native PSS</label><label class="mem-opt"><input type="checkbox" id="opt-swap-pss" checked><span class="swatch swap"></span>Swap PSS</label></div><p id="memory-ios-hint" class="memory-hint" hidden>iOS 无法提供 Native PSS / Swap PSS，当前为 physFootprint。</p><div class="metric-foot memory-foot"><span class="mem-total">峰值 <b id="memory-peak">--</b></span><span id="memory-native-row" class="mem-native" hidden>Native <b id="memory-native">--</b></span><span id="memory-swap-row" class="mem-swap" hidden>Swap <b id="memory-swap">--</b></span></div></article><article class="metric-card"><div class="metric-label"><span>GPU</span><em class="quality degraded">DEGRADED</em></div><strong id="gpu-value">--</strong><small>取决于设备能力</small><div class="metric-foot"><span>不支持时显示原因</span></div></article></div>
         <div class="chart-grid"><article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">FRAME PACING</p><h3>FPS 趋势</h3><div class="chart-legend"><span class="leg fps">FPS</span><span class="leg avg">平均值</span></div><p class="chart-axis-hint">纵轴：帧率 (FPS) · 横轴：时间 · 点击对齐该时刻</p></div><span class="chart-value" id="chart-fps-label">--</span></div><canvas id="fps-chart" height="200"></canvas></article><article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">RESOURCE LOAD</p><h3>CPU</h3><div class="chart-legend"><span class="leg cpu">App CPU</span><span class="leg avg">平均值</span></div><p class="chart-axis-hint">纵轴：占用 (%) · 横轴：时间 · 点击对齐该时刻</p></div><span class="chart-value" id="chart-resource-label">等待数据</span></div><canvas id="resource-chart" height="200"></canvas></article><article class="panel chart-card memory-chart-card"><div class="chart-title"><div><p class="eyebrow">PROCESS MEMORY</p><h3>Memory 趋势</h3><div class="chart-legend"><span class="leg total">TOTAL PSS</span><span class="leg native" id="legend-native" hidden>Native PSS</span><span class="leg swap" id="legend-swap" hidden>Swap PSS</span><span class="leg avg">平均值</span></div><p class="chart-axis-hint">纵轴：内存 (MB) · 横轴：时间 · 点击对齐该时刻</p></div><span class="chart-value" id="chart-memory-label">--</span></div><canvas id="memory-chart" height="220"></canvas></article></div>
+        <div id="power-overview" hidden>
+          <p class="muted-copy">Android 温度、电池与功耗：启动时采集一次，之后约每 30 秒更新。功率为整机电池侧数据；系统估算 mAh 为累计值，不是本次会话增量。点击曲线可对齐时间点。</p>
+          <div class="chart-grid">
+            <article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">THERMAL</p><h3>温度趋势</h3><p class="chart-axis-hint">电池 / CPU / GPU / 机身 · °C · 30s 采样</p></div></div><canvas id="overview-bat-temp-chart" height="220"></canvas></article>
+            <article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">BATTERY</p><h3>电量趋势</h3><p class="chart-axis-hint">电量 (%) · 30s 采样</p></div></div><canvas id="overview-bat-level-chart" height="220"></canvas></article>
+            <article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">POWER</p><h3>整机电池侧功率</h3><p class="chart-axis-hint">绝对值 (mW) · 充电时不代表整机总负载</p></div></div><canvas id="overview-bat-power-chart" height="220"></canvas></article>
+            <article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">SESSION ENERGY</p><h3>会话放电能量</h3><p class="chart-axis-hint">有效放电区间积分 (mWh) · 缺失区间不补算</p></div></div><canvas id="overview-bat-energy-chart" height="220"></canvas></article>
+            <article class="panel chart-card"><div class="chart-title"><div><p class="eyebrow">BATTERYSTATS</p><h3>系统估算累计耗电</h3><p class="chart-axis-hint">整机 / 目标 UID 累计 (mAh) · 非会话增量</p></div></div><canvas id="overview-bat-estimated-chart" height="220"></canvas></article>
+          </div>
+        </div>
         <div class="lower-grid"><section class="panel events-panel"><div class="section-heading"><div><p class="eyebrow">SIGNALS</p><h3>异常事件</h3></div><span id="event-count" class="count-badge">0</span></div><div id="event-list" class="event-list"><div class="empty-state">开始监测后，异常会出现在这里</div></div></section><section class="panel capability-summary"><div class="section-heading"><div><p class="eyebrow">CAPABILITY</p><h3>指标覆盖</h3></div></div><div id="monitor-capabilities" class="coverage-list"></div></section></div>
         </div>
         <div id="metric-pane-cpu" class="metric-pane" hidden>
@@ -173,10 +188,12 @@
               <div><dt>系统估算目标 UID 耗电</dt><dd id="bat-app-mah">--</dd></div>
             </dl>
             <p class="muted-copy" id="bat-availability">仅 Android；等待采样。不可读的指标显示“不可用”，不填充为 0。</p>
-            <p class="muted-copy">功率来自整机电池侧，不代表目标 App 功率；充电时包含流入电池的功率，不代表整机总负载。放电能量只积分状态为“放电中”且间隔不超过 15 秒的有效读数，缺失区间不补算。净电量下降允许负值（净充电）。系统估算耗电来自 batterystats 自充电统计起点的累计值，不是本次会话增量；目标 UID 可能被多个应用共享。不会执行 --reset。</p>
+            <p class="muted-copy">功率来自整机电池侧，不代表目标 App 功率；充电时包含流入电池的功率，不代表整机总负载。所有新增指标约每 30 秒采集。放电能量只积分状态为“放电中”且间隔不超过 45 秒的有效读数，缺失区间不补算。净电量下降允许负值（净充电）。系统估算耗电来自 batterystats 自充电统计起点的累计值，不是本次会话增量；目标 UID 可能被多个应用共享。不会执行 --reset。</p>
             <div class="detail-chart"><div class="chart-title"><h3>温度趋势</h3></div><canvas id="bat-temp-chart" height="220"></canvas></div>
             <div class="detail-chart"><div class="chart-title"><h3>电量趋势 (%)</h3></div><canvas id="bat-level-chart" height="220"></canvas></div>
             <div class="detail-chart"><div class="chart-title"><h3>整机电池侧功率 (mW)</h3></div><canvas id="bat-power-chart" height="220"></canvas></div>
+            <div class="detail-chart"><div class="chart-title"><h3>会话放电能量 (mWh)</h3></div><canvas id="bat-energy-chart" height="220"></canvas></div>
+            <div class="detail-chart"><div class="chart-title"><h3>系统估算累计耗电 (mAh)</h3></div><canvas id="bat-estimated-chart" height="220"></canvas></div>
           </section>
         </div>
         <div id="metric-pane-logs" class="metric-pane" hidden>
@@ -218,6 +235,6 @@
       </div>
     </div>
   </div>
-  <script src="/app.js?v=20261028-power"></script>
+  <script src="/app.js?v=20261028-power-30s"></script>
 </body>
 </html>

@@ -1,20 +1,23 @@
 import io
+import json
+import re
 import subprocess
 import tempfile
 import threading
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from adb_fps import SampleRecord, format_sample_line, write_report
+from adb_fps import SampleRecord, _align_next_tick, format_sample_line, write_report
 from perfpilot.android_power import (
     AndroidPowerMonitor, BATTERY_COMMAND, POWER_FIELDS,
     package_uid, parse_battery, parse_batterystats, parse_thermal,
 )
-from perfpilot.collectors import parse_collector_line
+from perfpilot.collectors import collector_command, parse_collector_line
 from perfpilot.devices import capabilities
 from perfpilot.events import sample_event
-from perfpilot.report import power_report_section, render_report
+from perfpilot.report import power_report_charts, power_report_section, render_report
 from perfpilot.session import SessionManager
 from perfpilot.store import RunStore
 from perfpilot.summary import summarize
@@ -56,6 +59,26 @@ Estimated power use (mAh):
 
 Per-app mobile ms per packet:
 """
+
+
+class ReportChartParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+        self.power_parents = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "article" and "power-chart" in attrs.get("class", "").split():
+            self.power_parents.append(list(self.stack))
+        if tag in ("div", "section", "article"):
+            self.stack.append((tag, attrs.get("class", "")))
+
+    def handle_endtag(self, tag):
+        if tag in ("div", "section", "article"):
+            if not self.stack or self.stack[-1][0] != tag:
+                raise AssertionError(f"Unbalanced report structure at {tag}: {self.stack}")
+            self.stack.pop()
 
 
 class PowerParserTests(unittest.TestCase):
@@ -143,32 +166,40 @@ class PowerMonitorTests(unittest.TestCase):
     def test_energy_trapezoid_and_level_drop(self):
         first = self.read_at(0)
         self.assertIsNone(first["dischargeEnergyMwh"])
-        second = self.read_at(5, BATTERY.replace("level: 70", "level: 69"))
+        second = self.read_at(30, BATTERY.replace("level: 70", "level: 69"))
         self.assertEqual(second["batteryDropPct"], 1)
-        self.assertAlmostEqual(second["dischargeEnergyMwh"], 10)
-        self.assertEqual(second["energyCoverageSec"], 5)
+        self.assertAlmostEqual(second["dischargeEnergyMwh"], 60)
+        self.assertEqual(second["energyCoverageSec"], 30)
+
+    def test_energy_uses_30_second_trapezoid_with_varying_power(self):
+        self.read_at(0)
+        values = self.read_at(30, BATTERY.replace("-1800000", "-900000"))
+        self.assertAlmostEqual(values["dischargeEnergyMwh"], 45)
+        self.assertEqual(values["energyCoverageSec"], 30)
 
     def test_charge_gaps_and_failures_not_integrated(self):
         self.read_at(0)
-        self.read_at(5)
-        charged = self.read_at(10, BATTERY.replace("status: 3", "status: 2").replace("level: 70", "level: 71"))
+        self.read_at(30)
+        charged = self.read_at(60, BATTERY.replace("status: 3", "status: 2").replace("level: 70", "level: 71"))
         self.assertEqual(charged["batteryDropPct"], -1)
-        self.assertEqual(charged["dischargeEnergyMwh"], 10)
-        self.read_at(15)
-        self.read_at(40)
-        failed = self.read_at(45, "Permission denied")
+        self.assertEqual(charged["dischargeEnergyMwh"], 60)
+        self.read_at(90)
+        self.read_at(150)
+        failed = self.read_at(180, "Permission denied")
         self.assertIsNone(failed["batteryLevelPct"])
-        self.read_at(50)
-        final = self.read_at(55)
-        self.assertEqual(final["dischargeEnergyMwh"], 20)
-        self.assertEqual(final["energyCoverageSec"], 10)
+        self.read_at(210)
+        final = self.read_at(240)
+        self.assertEqual(final["dischargeEnergyMwh"], 120)
+        self.assertEqual(final["energyCoverageSec"], 60)
 
     def test_zero_power_and_exact_gap_threshold(self):
         self.read_at(0, BATTERY.replace("-1800000", "0"))
-        values = self.read_at(15, BATTERY.replace("-1800000", "0"))
+        values = self.read_at(45, BATTERY.replace("-1800000", "0"))
         self.assertEqual(values["batteryPowerMw"], 0)
         self.assertEqual(values["dischargeEnergyMwh"], 0)
-        self.assertEqual(values["energyCoverageSec"], 15)
+        self.assertEqual(values["energyCoverageSec"], 45)
+        values = self.read_at(91, BATTERY.replace("-1800000", "0"))
+        self.assertEqual(values["energyCoverageSec"], 45)
 
     def test_stale_readings_are_removed(self):
         self.read_at(0)
@@ -177,15 +208,23 @@ class PowerMonitorTests(unittest.TestCase):
             self.monitor._read("thermal", (), parse_thermal)
             self.monitor.shell.return_value = STATS
             self.monitor._read("stats", (), lambda out: parse_batterystats(out, 10123))
-        with patch("perfpilot.android_power.time.monotonic", return_value=16):
+        with patch("perfpilot.android_power.time.monotonic", return_value=31):
             values = self.monitor.snapshot()
-            self.assertIsNone(values["batteryPowerMw"])
+            self.assertEqual(values["batteryPowerMw"], 7200)
             self.assertEqual(values["cpuTemperatureC"], 46.5)
-            self.assertEqual(values["batterySampleAgeSec"], 16)
+            self.assertEqual(values["batterySampleAgeSec"], 31)
         with patch("perfpilot.android_power.time.monotonic", return_value=91):
             values = self.monitor.snapshot()
+            self.assertIsNone(values["batteryPowerMw"])
             self.assertIsNone(values["cpuTemperatureC"])
             self.assertIsNone(values["appEstimatedMah"])
+
+    def test_reading_is_valid_at_90_second_boundary(self):
+        self.read_at(0)
+        with patch("perfpilot.android_power.time.monotonic", return_value=90):
+            self.assertEqual(self.monitor.snapshot()["batteryPowerMw"], 7200)
+        with patch("perfpilot.android_power.time.monotonic", return_value=90.01):
+            self.assertIsNone(self.monitor.snapshot()["batteryPowerMw"])
 
     def test_timeout_clears_previous_values_and_logs(self):
         self.read_at(0)
@@ -196,7 +235,7 @@ class PowerMonitorTests(unittest.TestCase):
         self.assertTrue(log.called)
         self.assertEqual(log.call_count, 1)
 
-    def test_slow_poll_cadence(self):
+    def test_all_power_metrics_poll_every_30_seconds(self):
         clock = [0.0]
         commands = []
         monitor = AndroidPowerMonitor(Mock(), "com.test")
@@ -213,7 +252,7 @@ class PowerMonitorTests(unittest.TestCase):
 
         def wait(seconds):
             clock[0] += seconds
-            if clock[0] > 30:
+            if clock[0] > 60:
                 monitor._stop.set()
 
         monitor.shell.side_effect = shell
@@ -222,8 +261,10 @@ class PowerMonitorTests(unittest.TestCase):
             monitor._run()
         battery_times = [at for at, args in commands if args[:2] == ("sh", "-c")]
         stats_times = [at for at, args in commands if args[:2] == ("dumpsys", "batterystats")]
-        self.assertEqual(battery_times, [0, 5, 10, 15, 20, 25, 30])
-        self.assertEqual(stats_times, [0, 30])
+        thermal_times = [at for at, args in commands if args == ("dumpsys", "thermalservice")]
+        self.assertEqual(battery_times, [0, 30, 60])
+        self.assertEqual(thermal_times, [0, 30, 60])
+        self.assertEqual(stats_times, [0, 30, 60])
 
     def test_worker_lifecycle_read_only_commands(self):
         completed = threading.Event()
@@ -254,6 +295,16 @@ class PowerMonitorTests(unittest.TestCase):
 
 
 class PowerPipelineTests(unittest.TestCase):
+    def test_existing_fps_cpu_memory_sampling_stays_one_second(self):
+        command = collector_command(
+            {"platform": "android", "id": "test-device"}, "com.test",
+            Path("report.html"), Path("stop.flag"),
+        )
+        self.assertEqual(command[command.index("--interval") + 1], "1")
+        with patch("adb_fps.time.monotonic", return_value=0), patch("adb_fps.time.sleep") as sleep:
+            self.assertEqual(_align_next_tick(0, 1), 1)
+            sleep.assert_called_once_with(1)
+
     def sample(self):
         parsed = parse_collector_line(format_sample_line(60, 12, 100, power=parse_battery(BATTERY)))
         self.assertIsNotNone(parsed)
@@ -271,6 +322,47 @@ class PowerPipelineTests(unittest.TestCase):
         self.assertIn("不是本次会话增量", document)
         self.assertEqual(power_report_section([{"fps": 60}]), "")
         self.assertNotIn("power", summarize([{"fps": 60}]))
+
+    def test_five_power_charts_are_in_main_report_grid_without_duplicates(self):
+        samples = []
+        for index in range(3):
+            event = self.sample()
+            event.update({
+                "elapsedMs": index * 30000,
+                "dischargeEnergyMwh": index * 60,
+                "deviceEstimatedMah": 100 + index * 2,
+                "appEstimatedMah": 10 + index,
+            })
+            samples.append(event)
+        document = render_report({"device": {"platform": "android"}}, samples)
+        parser = ReportChartParser()
+        parser.feed(document)
+        self.assertEqual(parser.stack, [])
+        self.assertEqual(len(parser.power_parents), 5)
+        for parents in parser.power_parents:
+            self.assertIn(("div", "chart-grid"), parents)
+            self.assertNotIn(("section", "table-card"), parents)
+        for title in ("温度趋势", "电量趋势", "整机电池侧功率", "会话放电能量", "系统估算累计耗电"):
+            self.assertIn(f"<h3>{title}</h3>", document)
+        self.assertIn("均约 30s 采样", document)
+        self.assertNotIn("电池约 5s", document)
+        self.assertLess(document.index('class="chart-card power-chart"'), document.index("<h2>Android 温度"))
+        payload = json.loads(re.search(r"const REPORT_DATA = (.*?);\n", document, re.S)[1])
+        self.assertEqual(payload["times"], [0, 30000, 60000])
+        power = {item["id"]: item for item in payload["power"]}
+        self.assertEqual(power["inspect-battery-energy"]["values"], [0, 60, 120])
+        self.assertEqual(power["inspect-battery-estimated"]["values"], [10, 11, 12])
+
+    def test_power_charts_handle_missing_values_without_affecting_ios_reports(self):
+        empty = dict.fromkeys(POWER_FIELDS)
+        charts = power_report_charts([empty])
+        self.assertEqual(charts.count('class="chart-card power-chart"'), 5)
+        self.assertEqual(charts.count("无可读数据"), 5)
+        self.assertNotIn('class="chart-card power-chart"', power_report_section([empty], include_charts=False))
+        ios = render_report({"device": {"platform": "ios"}}, [{"fps": 60, "cpu": 10, "memory": 100}])
+        self.assertNotIn('class="chart-card power-chart"', ios)
+        self.assertNotIn('id="inspect-battery-power"', ios)
+        self.assertEqual(power_report_charts([]), "")
 
     def test_stale_report_does_not_reuse_last_valid_reading(self):
         latest = {key: None for key in POWER_FIELDS}

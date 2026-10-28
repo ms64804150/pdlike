@@ -37,6 +37,9 @@ BATTERY_KEYS = (
 )
 THERMAL_KEYS = ("cpuTemperatureC", "gpuTemperatureC", "skinTemperatureC", "thermalStatus")
 STATS_KEYS = ("deviceEstimatedMah", "appEstimatedMah")
+POWER_POLL_INTERVAL_SEC = 30
+POWER_STALE_AFTER_SEC = 90
+POWER_MAX_ENERGY_GAP_SEC = 45
 
 # One remote shell avoids spawning an ADB process per battery node.
 BATTERY_COMMAND = (
@@ -203,7 +206,7 @@ class AndroidPowerMonitor:
                     if self._previous:
                         previous_time, previous_power = self._previous
                         seconds = now - previous_time
-                        if 0 < seconds <= 15:
+                        if 0 < seconds <= POWER_MAX_ENERGY_GAP_SEC:
                             self._energy += (previous_power + power) / 2 * seconds / 3600
                             self._coverage += seconds
                     self._previous = (now, power)
@@ -217,43 +220,42 @@ class AndroidPowerMonitor:
         result: dict[str, Optional[float]] = dict.fromkeys(POWER_FIELDS)
         now = time.monotonic()
         with self._lock:
-            for group, age_key, ttl in (
-                ("battery", "batterySampleAgeSec", 15),
-                ("thermal", "thermalSampleAgeSec", 90),
-                ("stats", "batteryStatsAgeSec", 90),
+            for group, age_key in (
+                ("battery", "batterySampleAgeSec"),
+                ("thermal", "thermalSampleAgeSec"),
+                ("stats", "batteryStatsAgeSec"),
             ):
                 if group in self._groups:
                     timestamp, values = self._groups[group]
                     age = max(0.0, now - timestamp)
                     result[age_key] = age
-                    if age <= ttl:
+                    if age <= POWER_STALE_AFTER_SEC:
                         result.update(values)
         return result
 
     def _run(self) -> None:
-        slow_at = 0.0
         while not self._stop.is_set():
             started = time.monotonic()
             self._read("battery", ("sh", "-c", BATTERY_COMMAND), parse_battery)
-            if started >= slow_at and not self._stop.is_set():
-                self._read("thermal", ("dumpsys", "thermalservice"), parse_thermal)
-                if self._stop.is_set():
-                    break
+            if self._stop.is_set():
+                break
+            self._read("thermal", ("dumpsys", "thermalservice"), parse_thermal)
+            if self._stop.is_set():
+                break
+            if self._uid is None:
+                try:
+                    self._uid = package_uid(
+                        self.shell("cmd", "package", "list", "packages", "-U", "--user", "current", self.package),
+                        self.package,
+                    )
+                except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+                    self._warn("uid", f"无法读取目标 UID: {error}")
                 if self._uid is None:
-                    try:
-                        self._uid = package_uid(
-                            self.shell("cmd", "package", "list", "packages", "-U", "--user", "current", self.package),
-                            self.package,
-                        )
-                    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
-                        self._warn("uid", f"无法读取目标 UID: {error}")
-                    if self._uid is None:
-                        self._warn("uid", "目标 UID 不可用，不归因应用耗电")
-                if self._stop.is_set():
-                    break
-                self._read(
-                    "stats", ("dumpsys", "batterystats", "--charged", self.package),
-                    lambda output: parse_batterystats(output, self._uid),
-                )
-                slow_at = started + 30
-            self._stop.wait(max(0.0, 5 - (time.monotonic() - started)))
+                    self._warn("uid", "目标 UID 不可用，不归因应用耗电")
+            if self._stop.is_set():
+                break
+            self._read(
+                "stats", ("dumpsys", "batterystats", "--charged", self.package),
+                lambda output: parse_batterystats(output, self._uid),
+            )
+            self._stop.wait(max(0.0, POWER_POLL_INTERVAL_SEC - (time.monotonic() - started)))

@@ -381,6 +381,9 @@ def _inspect_script(payload: dict[str, Any]) -> str:
     const native = (data.native || [])[safe];
     const swap = (data.swap || [])[safe];
     const gpu = (data.gpu || [])[safe];
+    (data.power || []).forEach(function (item) {
+      setText(item.id, fmt(item.values[safe], item.unit, '不可用'));
+    });
     document.querySelectorAll('svg.report-chart').forEach(function (svg) {
       const t0 = Number(svg.dataset.t0);
       const tSpan = Number(svg.dataset.tspan);
@@ -780,11 +783,55 @@ def _overview_html(
 </div>"""
 
 
-def power_report_section(samples: list[dict[str, Any]]) -> str:
-    if not any(
+def _has_power_samples(samples: list[dict[str, Any]]) -> bool:
+    return any(
         key in item or key in (item.get("metrics") or {})
         for item in samples for key in POWER_FIELDS
+    )
+
+
+def power_report_charts(samples: list[dict[str, Any]]) -> str:
+    if not _has_power_samples(samples):
+        return ""
+    times = [_elapsed_ms(item, index) for index, item in enumerate(samples)]
+    series = {key: [_num(_field(item, key)) for item in samples] for key in POWER_FIELDS}
+    labels = {
+        "batteryTemperatureC": "电池", "cpuTemperatureC": "CPU",
+        "gpuTemperatureC": "GPU", "skinTemperatureC": "机身",
+        "batteryLevelPct": "电量", "batteryPowerMw": "功率",
+        "dischargeEnergyMwh": "放电能量",
+        "deviceEstimatedMah": "整机累计", "appEstimatedMah": "UID 累计",
+    }
+    charts = []
+    for keys, title, unit, fixed_max in (
+        (("batteryTemperatureC", "cpuTemperatureC", "gpuTemperatureC", "skinTemperatureC"), "温度趋势", "°C", None),
+        (("batteryLevelPct",), "电量趋势", "%", 100),
+        (("batteryPowerMw",), "整机电池侧功率", "mW", None),
+        (("dischargeEnergyMwh",), "会话放电能量", "mWh", None),
+        (("deviceEstimatedMah", "appEstimatedMah"), "系统估算累计耗电", "mAh", None),
     ):
+        values = [value for key in keys for value in series[key] if value is not None]
+        y_min = min([0.0, *values])
+        y_max = fixed_max or max([10.0, *values]) * 1.1
+        chart = _chart(
+            [{"values": series[key], "color": color, "label": labels[key]}
+             for key, color in zip(keys, (FPS_COLOR, CPU_COLOR, NATIVE_COLOR, MEM_COLOR))],
+            times, y_min, y_max, unit,
+        ) if values else '<p class="empty">无可读数据</p>'
+        hint = "约 30s 采样 · 点击对齐该时刻"
+        if unit == "mAh":
+            hint += " · 自充电统计起点累计值，非会话增量"
+        elif unit == "mW":
+            hint += " · 整机电池侧，非 App 功率"
+        charts.append(
+            f'<article class="chart-card power-chart"><h3>{title}</h3>'
+            f'<p class="chart-axis-hint">{hint}</p>{chart}</article>'
+        )
+    return "".join(charts)
+
+
+def power_report_section(samples: list[dict[str, Any]], *, include_charts: bool = True) -> str:
+    if not _has_power_samples(samples):
         return ""
     times = [_elapsed_ms(item, index) for index, item in enumerate(samples)]
     series = {key: [_num(_field(item, key)) for item in samples] for key in POWER_FIELDS}
@@ -803,21 +850,7 @@ def power_report_section(samples: list[dict[str, Any]]) -> str:
             f'<article class="metric-card"><div>{html.escape(label)}</div>'
             f'<strong>{_fmt(latest, " " + unit)}</strong>{detail}</article>'
         )
-    charts = []
-    for keys, title, unit, fixed_max in (
-        (("batteryTemperatureC", "cpuTemperatureC", "gpuTemperatureC", "skinTemperatureC"), "温度趋势", "°C", None),
-        (("batteryLevelPct",), "电量趋势", "%", 100),
-        (("batteryPowerMw",), "整机电池侧功率", "mW", None),
-    ):
-        values = [value for key in keys for value in series[key] if value is not None]
-        y_min = min([0.0, *values])
-        y_max = fixed_max or max([10.0, *values]) * 1.1
-        chart = _chart(
-            [{"values": series[key], "color": color, "label": POWER_FIELDS[key][0]}
-             for key, color in zip(keys, (FPS_COLOR, CPU_COLOR, NATIVE_COLOR, MEM_COLOR))],
-            times, y_min, y_max, unit,
-        ) if values else '<p class="empty">无可读数据</p>'
-        charts.append(f'<article class="chart-card"><h3>{title}</h3>{chart}</article>')
+    charts = f'<div class="chart-grid">{power_report_charts(samples)}</div>' if include_charts else ""
     headings = "".join(
         f"<th>{html.escape(label)} ({html.escape(unit)})</th>" for label, unit in POWER_FIELDS.values()
     )
@@ -828,16 +861,16 @@ def power_report_section(samples: list[dict[str, Any]]) -> str:
     )
     return (
         '<section class="table-card"><h2>Android 温度 / 电池 / 功耗</h2>'
-        '<p class="hint">电池约 5s，温控与耗电统计约 30s；数据年龄随样本保存。'
+        '<p class="hint">温度、电池与耗电统计均约 30s 采样；数据年龄随样本保存，超过 90s 视为过期。'
         '不可读或过期显示 -。电池侧功率为整机电流绝对值 × 电压，不是目标 App 功率；'
         '充电时反映电池充入功率而非整机总负载。净电量下降可为负值（净充电）。'
-        '会话放电能量仅积分放电状态下间隔不超过 15s 的有效读数，缺失区间不补算，'
+        '会话放电能量仅积分放电状态下间隔不超过 45s 的有效读数，缺失区间不补算，'
         '请结合覆盖时长使用。系统估算 mAh 为自充电统计起点的累计值，不是本次会话增量，'
         '目标 UID 可能被多个应用共享；未执行 --reset。'
         '电池状态：1 未知 / 2 充电 / 3 放电 / 4 未充电 / 5 满电；'
         '温控：0 正常 / 1 轻度 / 2 中度 / 3 严重 / 4 临界 / 5 紧急 / 6 关机。</p>'
         f'<div class="metric-grid">{"".join(cards)}</div>'
-        f'<div class="chart-grid">{"".join(charts)}</div>'
+        f'{charts}'
         f'<div class="table-wrap"><table><thead><tr><th>时间</th>{headings}</tr></thead>'
         f'<tbody>{rows}</tbody></table></div></section>'
     )
@@ -988,6 +1021,21 @@ def render_report(meta: dict[str, Any], samples: list[dict[str, Any]]) -> str:
         if has_swap
         else '<div id="inspect-swap-cell" hidden><small>Swap PSS</small><b id="inspect-swap">--</b></div>'
     )
+    power_inspect = [
+        {"id": field_id, "label": label, "unit": unit,
+         "values": _compact_series([_num(_field(item, key)) for item in samples])}
+        for field_id, key, label, unit in (
+            ("inspect-battery-temp", "batteryTemperatureC", "电池温度", " °C"),
+            ("inspect-battery-level", "batteryLevelPct", "电量", "%"),
+            ("inspect-battery-power", "batteryPowerMw", "电池侧功率", " mW"),
+            ("inspect-battery-energy", "dischargeEnergyMwh", "会话放电能量", " mWh"),
+            ("inspect-battery-estimated", "appEstimatedMah", "目标 UID 累计耗电", " mAh"),
+        )
+    ] if _has_power_samples(samples) else []
+    power_cells = "".join(
+        f'<div><small>{item["label"]}</small><b id="{item["id"]}">--</b></div>'
+        for item in power_inspect
+    )
     inspect_payload = {
         "times": [round(float(item), 1) for item in times],
         "fps": _compact_series(fps),
@@ -998,6 +1046,7 @@ def render_report(meta: dict[str, Any], samples: list[dict[str, Any]]) -> str:
         "gpu": _compact_series(gpu),
         "hasNative": has_native,
         "hasSwap": has_swap,
+        "power": power_inspect,
     }
     log.info(
         "[ReportInspect] embed runId=%s samples=%s native=%s swap=%s",
@@ -1142,6 +1191,7 @@ td.mono{{font-family:var(--mono);font-size:11px}}
     {native_cell}
     {swap_cell}
     <div><small>GPU</small><b id="inspect-gpu">不支持</b></div>
+    {power_cells}
   </div>
 </aside>
 <div class="chart-grid">
@@ -1154,8 +1204,9 @@ td.mono{{font-family:var(--mono);font-size:11px}}
 <article class="chart-card memory-chart" data-chart-scale="1"><div class="chart-title"><div><p class="eyebrow">PROCESS MEMORY</p><h3>Memory 趋势</h3>
 {_legend([(color, name) for name, color in mem_legend])}
 <p class="chart-axis-hint">纵轴：内存 (MB) · 横轴：时间 · 点击对齐该时刻</p></div><div><span class="chart-value" id="chart-memory-label" style="color:var(--green)">{' · '.join(mem_bits)}</span><div class="chart-actions"><button type="button" class="chart-scale-btn" data-chart-scale="-1" title="缩小图表" aria-label="缩小图表" disabled>-</button><span class="chart-scale-status">1x</span><button type="button" class="chart-scale-btn" data-chart-scale="1" title="放大图表" aria-label="放大图表">+</button></div></div></div><div class="chart-viewport">{mem_svg}</div></article>
+{power_report_charts(samples)}
 </div>
-{power_report_section(samples)}
+{power_report_section(samples, include_charts=False)}
 <section class="table-card">
 <div class="chart-title"><div><p class="eyebrow">SAMPLES</p><h3>采样明细</h3>
 <p class="hint">「场景」和「脚本函数」用于和自动化用例对齐。监测中调用 <code>POST /api/v1/runs/{{runId}}/marker</code>，body 为 {{"scene":"进入大厅","scriptFn":"test_enter_lobby"}}，之后的每个采样点都会带上这两列。</p></div></div>
