@@ -796,7 +796,7 @@ function resetMetricDisplay(session) {
     const node = $(id);
     if (node) node.textContent = '--';
   });
-  ['fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart'].forEach((id) => {
+  ['fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart', 'bat-temp-chart', 'bat-level-chart', 'bat-power-chart'].forEach((id) => {
     const canvas = $(id);
     if (!canvas) return;
     const context = canvas.getContext('2d');
@@ -807,6 +807,7 @@ function resetMetricDisplay(session) {
   // the active session has no sample, otherwise the previous device's
   // time-point values remain visible while the next device is loading.
   renderInspectPanel(session, null);
+  updateBatteryPane(session, null);
   drawCharts([], (session && session.extras) || {}, inspectMarkerTime(session, []));
 }
 
@@ -1375,13 +1376,13 @@ function metricSource(session, id) {
     memory: android ? 'dumpsys meminfo TOTAL PSS' : 'physFootprint',
     gpu: android ? '未接入 Android GPU 计数器' : 'DVT Device Utilization',
     network: 'Phase 1 未采集 UID 流量',
-    battery: 'Phase 1 未采集电池接口',
+    battery: android ? 'dumpsys battery / thermalservice / batterystats + 电池节点' : 'iOS 暂不采集电池接口',
   };
   return sources[id] || '能力探测';
 }
 
 function metricInterval(id) {
-  const intervals = { fps: '1s 窗口', cpu: '1s', memory: '约 1s', gpu: '1s', network: '—', battery: '—', logs: '实时' };
+  const intervals = { fps: '1s 窗口', cpu: '1s', memory: '约 1s', gpu: '1s', network: '—', battery: '电池约 5s，温控 / 耗电统计约 30s', logs: '实时' };
   return intervals[id] || '1s';
 }
 
@@ -1491,6 +1492,50 @@ function renderCollectorLog(lines) {
   if (pinBottom) box.scrollTop = box.scrollHeight;
 }
 
+function updateBatteryPane(session, sample) {
+  const android = session && session.device && session.device.platform === 'android';
+  const metrics = [
+    ['bat-level-detail', 'batteryLevelPct', '%'],
+    ['bat-temp-detail', 'batteryTemperatureC', ' °C'],
+    ['bat-cpu-temp', 'cpuTemperatureC', ' °C'],
+    ['bat-gpu-temp', 'gpuTemperatureC', ' °C'],
+    ['bat-skin-temp', 'skinTemperatureC', ' °C'],
+    ['bat-current', 'batteryCurrentMa', ' mA'],
+    ['bat-voltage', 'batteryVoltageV', ' V'],
+    ['bat-power', 'batteryPowerMw', ' mW'],
+    ['bat-drop', 'batteryDropPct', ' 个百分点'],
+    ['bat-energy', 'dischargeEnergyMwh', ' mWh'],
+    ['bat-coverage', 'energyCoverageSec', ' s'],
+    ['bat-device-mah', 'deviceEstimatedMah', ' mAh'],
+    ['bat-app-mah', 'appEstimatedMah', ' mAh'],
+  ];
+  let valid = 0;
+  for (const [id, key, unit] of metrics) {
+    const value = sample && sample[key];
+    const ok = android && Number.isFinite(value);
+    if (ok) valid += 1;
+    setStatValue(id, ok ? `${value.toFixed(key === 'batteryVoltageV' ? 3 : 2)}${unit}` : (android ? '不可用' : '暂不采集'), ok);
+  }
+  const status = sample && sample.batteryStatus;
+  const statuses = { 1: '未知', 2: '充电中', 3: '放电中', 4: '未充电', 5: '已充满' };
+  setStatValue('bat-charge-detail', android ? (statuses[status] || '不可用') : '暂不采集', Boolean(android && statuses[status]));
+  const thermal = sample && sample.thermalStatus;
+  const levels = ['正常', '轻度', '中度', '严重', '临界', '紧急', '关机'];
+  setStatValue('bat-thermal-status', android && levels[thermal] ? `${thermal} · ${levels[thermal]}` : (android ? '不可用' : '暂不采集'), Boolean(android && levels[thermal]));
+  setDetailMeta('bat-detail-meta', 'bat-detail-quality', session, 'battery', valid > 0);
+  if (android && valid > 0 && valid < metrics.length) {
+    $('bat-detail-quality').textContent = 'PARTIAL';
+    $('bat-detail-quality').className = 'quality degraded';
+    $('bat-detail-meta').textContent = $('bat-detail-meta').textContent.replace('quality：AVAILABLE', 'quality：PARTIAL');
+  }
+  if ($('bat-availability')) {
+    const age = (key) => Number.isFinite(sample && sample[key]) ? `${sample[key].toFixed(1)}s` : '--';
+    $('bat-availability').textContent = android
+      ? `数据年龄：电池 ${age('batterySampleAgeSec')} / 温控 ${age('thermalSampleAgeSec')} / 耗电统计 ${age('batteryStatsAgeSec')}。电池超过 15s、温控和统计超过 90s 后不再展示旧值；缺失或权限受限显示不可用。`
+      : 'iOS 暂不采集温度、电池及功耗。';
+  }
+}
+
 function updateDetailPane(session, sample) {
   const extras = (session && session.extras) || {};
   const nums = (session && session.samples) || [];
@@ -1556,14 +1601,12 @@ function updateDetailPane(session, sample) {
   if ($('net-unsupported')) $('net-unsupported').hidden = netOk;
   if ($('net-chart-wrap')) $('net-chart-wrap').hidden = !netOk;
 
-  setDetailMeta('bat-detail-meta', 'bat-detail-quality', session, 'battery', false);
-  setStatValue('bat-level-detail', '不支持', false);
-  setStatValue('bat-charge-detail', '不支持', false);
+  updateBatteryPane(session, sample);
   const logOn = logcatEnabled(session);
   setDetailMeta('log-detail-meta', 'log-detail-quality', session, 'logs', logOn);
 
   const tab = session.metricTab || state.metricTab || 'overview';
-  if (tab !== 'overview' && tab !== 'logs' && tab !== 'battery') drawDetailCharts(session, nums);
+  if (tab !== 'overview' && tab !== 'logs') drawDetailCharts(session, nums);
 }
 
 function drawDetailCharts(session, samples) {
@@ -1576,6 +1619,24 @@ function drawDetailCharts(session, samples) {
     ? selectedMarker
     : null;
   const tab = (session && session.metricTab) || state.metricTab || 'overview';
+  if (tab === 'battery') {
+    const thermalSeries = [
+      ['batteryTemperatureC', '#ed775f', '电池'],
+      ['cpuTemperatureC', '#5f91d3', 'CPU'],
+      ['gpuTemperatureC', '#6b5ce7', 'GPU'],
+      ['skinTemperatureC', '#2c9b6d', '机身'],
+    ].map(([key, color, label]) => ({ values: list.map((item) => item[key]), color, label }));
+    for (const [id, series, unit, fixedMax] of [
+      ['bat-temp-chart', thermalSeries, '°C', null],
+      ['bat-level-chart', [{ values: list.map((item) => item.batteryLevelPct), color: '#2c9b6d', label: '电量' }], '%', 100],
+      ['bat-power-chart', [{ values: list.map((item) => item.batteryPowerMw), color: '#e6a84a', label: '电池侧功率' }], 'mW', null],
+    ]) {
+      const values = series.flatMap((item) => item.values).filter(Number.isFinite);
+      const yMin = Math.min(0, ...values);
+      const yMax = fixedMax || Math.max(10, ...values) * 1.1;
+      if ($(id)) drawChart($(id), { series, times, yMin, yMax, ySuffix: unit, markerTime: marker });
+    }
+  }
   if (tab === 'cpu' && $('cpu-detail-chart')) {
     const cpuValues = list.map((item) => item.cpu);
     const cpuY = chartYAxis('pct', [cpuValues]);
@@ -2770,7 +2831,7 @@ on('metric-subtabs', 'click', (event) => {
   const button = event.target.closest('.metric-subtab');
   if (button && button.dataset.metric) setMetricTab(button.dataset.metric);
 });
-['fps-chart', 'resource-chart', 'memory-chart', 'fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart'].forEach((id) => {
+['fps-chart', 'resource-chart', 'memory-chart', 'fps-detail-chart', 'cpu-detail-chart', 'mem-detail-chart', 'gpu-detail-chart', 'net-detail-chart', 'bat-temp-chart', 'bat-level-chart', 'bat-power-chart'].forEach((id) => {
   const canvas = $(id);
   if (!canvas) return;
   canvas.addEventListener('click', onChartClick);

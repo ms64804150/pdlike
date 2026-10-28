@@ -42,7 +42,7 @@
           <button type="button" class="metric-subtab" data-metric="fps">FPS</button>
           <button type="button" class="metric-subtab" data-metric="gpu">GPU</button>
           <button type="button" class="metric-subtab" data-metric="network">Network</button>
-          <button type="button" class="metric-subtab" data-metric="battery">Battery</button>
+          <button type="button" class="metric-subtab" data-metric="battery">温度 / 电池</button>
           <button type="button" class="metric-subtab" data-metric="logs">日志</button>
         </div>
         <aside id="timeline-inspect" class="panel timeline-inspect" hidden>
@@ -154,15 +154,29 @@
         </div>
         <div id="metric-pane-battery" class="metric-pane" hidden>
           <section class="panel detail-page">
-            <div class="detail-head"><div><p class="eyebrow">POWER</p><h3>Battery</h3><p class="detail-meta" id="bat-detail-meta">source · 采样 · quality</p></div><em class="quality" id="bat-detail-quality">UNSUPPORTED</em></div>
+            <div class="detail-head"><div><p class="eyebrow">THERMAL / POWER</p><h3>温度 / 电池 / 功耗</h3><p class="detail-meta" id="bat-detail-meta">等待 Android 采样</p></div><em class="quality" id="bat-detail-quality">UNSUPPORTED</em></div>
             <dl class="detail-stats">
               <div><dt>电量</dt><dd id="bat-level-detail" class="unsupported">不支持</dd></div>
               <div><dt>充电状态</dt><dd id="bat-charge-detail" class="unsupported">不支持</dd></div>
+              <div><dt>电池温度</dt><dd id="bat-temp-detail">--</dd></div>
+              <div><dt>CPU 最高温区</dt><dd id="bat-cpu-temp">--</dd></div>
+              <div><dt>GPU 最高温区</dt><dd id="bat-gpu-temp">--</dd></div>
+              <div><dt>机身最高温区</dt><dd id="bat-skin-temp">--</dd></div>
+              <div><dt>温控等级</dt><dd id="bat-thermal-status">--</dd></div>
+              <div><dt>电池电流（驱动原始方向）</dt><dd id="bat-current">--</dd></div>
+              <div><dt>电压</dt><dd id="bat-voltage">--</dd></div>
+              <div><dt>整机电池侧功率（绝对值）</dt><dd id="bat-power">--</dd></div>
+              <div><dt>会话净电量下降</dt><dd id="bat-drop">--</dd></div>
+              <div><dt>会话放电能量（积分）</dt><dd id="bat-energy">--</dd></div>
+              <div><dt>放电积分覆盖时长</dt><dd id="bat-coverage">--</dd></div>
+              <div><dt>系统估算整机耗电</dt><dd id="bat-device-mah">--</dd></div>
+              <div><dt>系统估算目标 UID 耗电</dt><dd id="bat-app-mah">--</dd></div>
             </dl>
-            <div class="unsupported-panel">
-              <p>Phase 1 未采集电池接口</p>
-              <small>不显示 0% 或过期值。</small>
-            </div>
+            <p class="muted-copy" id="bat-availability">仅 Android；等待采样。不可读的指标显示“不可用”，不填充为 0。</p>
+            <p class="muted-copy">功率来自整机电池侧，不代表目标 App 功率；充电时包含流入电池的功率，不代表整机总负载。放电能量只积分状态为“放电中”且间隔不超过 15 秒的有效读数，缺失区间不补算。净电量下降允许负值（净充电）。系统估算耗电来自 batterystats 自充电统计起点的累计值，不是本次会话增量；目标 UID 可能被多个应用共享。不会执行 --reset。</p>
+            <div class="detail-chart"><div class="chart-title"><h3>温度趋势</h3></div><canvas id="bat-temp-chart" height="220"></canvas></div>
+            <div class="detail-chart"><div class="chart-title"><h3>电量趋势 (%)</h3></div><canvas id="bat-level-chart" height="220"></canvas></div>
+            <div class="detail-chart"><div class="chart-title"><h3>整机电池侧功率 (mW)</h3></div><canvas id="bat-power-chart" height="220"></canvas></div>
           </section>
         </div>
         <div id="metric-pane-logs" class="metric-pane" hidden>
@@ -204,6 +218,6 @@
       </div>
     </div>
   </div>
-  <script src="/app.js?v=20260915e"></script>
+  <script src="/app.js?v=20261028-power"></script>
 </body>
 </html>

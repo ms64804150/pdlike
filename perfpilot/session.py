@@ -13,6 +13,7 @@ from queue import Queue
 from typing import Any, Optional
 
 from . import events
+from .android_power import POWER_FIELDS
 from .collectors import collector_command, decode_collector_line, parse_collector_line, start_collector
 from .logcat import run_package_logcat
 from .logutil import get_logger
@@ -761,7 +762,7 @@ class SessionManager:
                     if parsed:
                         extra_metrics: dict[str, Any] = {
                             key: parsed[key]
-                            for key in ("nativePss", "swapPss")
+                            for key in ("nativePss", "swapPss", *POWER_FIELDS)
                             if key in parsed
                         }
                         marker = session.get("marker") or {}

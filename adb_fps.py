@@ -10,9 +10,11 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from perfpilot.android_power import AndroidPowerMonitor, POWER_FIELDS
 
 
 PROFILE_MARKER = "---PROFILEDATA---"
@@ -224,6 +226,7 @@ class SampleRecord:
     cpu_pct: Optional[float]
     pss_mb: Optional[float]
     jank: int
+    power: dict[str, Optional[float]] = field(default_factory=dict)
 
 
 def write_report(
@@ -248,6 +251,14 @@ def write_report(
     fps_ge25_pct = fps_ge25_samples / len(records) * 100 if records else 0.0
     avg_cpu = cpu_sum / cpu_samples if cpu_samples else 0.0
     avg_pss = pss_sum / pss_samples if pss_samples else 0.0
+    from perfpilot.report import power_report_section
+
+    elapsed_ms = 0.0
+    power_samples = []
+    for record in records:
+        elapsed_ms += record.elapsed_seconds * 1000
+        power_samples.append({"elapsedMs": elapsed_ms, **record.power})
+    power_html = power_report_section(power_samples)
 
     def chart_svg(title: str, field: str, color: str, unit: str) -> str:
         width, height = 860, 220
@@ -295,6 +306,7 @@ def write_report(
 <body><h1>ADB 性能检测报告</h1><p>应用：{html.escape(package)}　生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
 <div class="summary"><div class="metric">平均 FPS<b>{average_fps:.1f}</b></div><div class="metric">累计帧数<b>{total_frames}</b></div><div class="metric">FPS ≥ 18<b>{fps_ge18_pct:.1f}%</b></div><div class="metric">FPS ≥ 25<b>{fps_ge25_pct:.1f}%</b></div><div class="metric">平均 CPU<b>{avg_cpu:.1f}%</b></div><div class="metric">平均内存<b>{avg_pss:.1f} MB</b></div><div class="metric">峰值内存<b>{pss_peak:.1f} MB</b></div></div>
 {chart_svg('FPS 趋势', 'fps', '#0f766e', '')}{chart_svg('App CPU 趋势', 'cpu_pct', '#c2410c', '%')}{chart_svg('App PSS 趋势', 'pss_mb', '#2563eb', ' MB')}
+{power_html}
 <h2>采样明细</h2><table><thead><tr><th>时间(s)</th><th>FPS</th><th>平均 FPS</th><th>CPU(%)</th><th>PSS(MB)</th><th>Jank</th></tr></thead><tbody>{''.join(rows)}</tbody></table></body></html>"""
     output_path.write_text(document, encoding="utf-8")
 
@@ -421,6 +433,7 @@ def format_sample_line(
     swap: Optional[float] = None,
     emit_native: bool = False,
     emit_swap: bool = False,
+    power: Optional[dict[str, Optional[float]]] = None,
 ) -> str:
     parts = [
         "PERFPILOT_SAMPLE",
@@ -432,6 +445,10 @@ def format_sample_line(
         parts.append(f"nativePss={_fmt_metric(native)}")
     if emit_swap:
         parts.append(f"swapPss={_fmt_metric(swap)}")
+    if power is not None:
+        for key in POWER_FIELDS:
+            value = power.get(key)
+            parts.append(f"{key}={value:.6f}" if value is not None else f"{key}=none")
     return "\t".join(parts)
 
 
@@ -705,6 +722,8 @@ def run(args: argparse.Namespace) -> int:
         flush=True,
     )
     exit_code = 0
+    power_monitor = AndroidPowerMonitor(lambda *command: adb_shell(args.serial, *command), package)
+    power_monitor.start()
     try:
         while True:
             extras = {
@@ -760,6 +779,7 @@ def run(args: argparse.Namespace) -> int:
                         process_metrics.swap_pss_mb,
                         emit_native,
                         emit_swap,
+                        power_monitor.snapshot(),
                     ),
                     flush=True,
                 )
@@ -847,6 +867,7 @@ def run(args: argparse.Namespace) -> int:
                     process_metrics.cpu_pct,
                     process_metrics.pss_mb,
                     jank,
+                    power_monitor.snapshot(),
                 )
             )
             if charts:
@@ -860,6 +881,7 @@ def run(args: argparse.Namespace) -> int:
                     process_metrics.swap_pss_mb,
                     emit_native,
                     emit_swap,
+                    records[-1].power,
                 ),
                 flush=True,
             )
@@ -884,6 +906,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"[AndroidSample] sample abort package={package} err={error}", flush=True)
         exit_code = 1
     finally:
+        power_monitor.close()
         if charts and not charts.closed:
             charts.close()
         write_report(

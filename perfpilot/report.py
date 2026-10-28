@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .logutil import get_logger
+from .android_power import POWER_FIELDS
 
 FPS_COLOR = "#ed775f"
 CPU_COLOR = "#5f91d3"
@@ -779,6 +780,69 @@ def _overview_html(
 </div>"""
 
 
+def power_report_section(samples: list[dict[str, Any]]) -> str:
+    if not any(
+        key in item or key in (item.get("metrics") or {})
+        for item in samples for key in POWER_FIELDS
+    ):
+        return ""
+    times = [_elapsed_ms(item, index) for index, item in enumerate(samples)]
+    series = {key: [_num(_field(item, key)) for item in samples] for key in POWER_FIELDS}
+    cards = []
+    for key, (label, unit) in POWER_FIELDS.items():
+        values = [value for value in series[key] if value is not None]
+        # Last sample, not the last successful sample: stale values stay missing.
+        latest = series[key][-1] if series[key] else None
+        detail = ""
+        if key.endswith("TemperatureC") or key == "batteryPowerMw":
+            detail = (
+                f"<small>平均 {_fmt(sum(values) / len(values) if values else None, ' ' + unit)}"
+                f" · 峰值 {_fmt(max(values) if values else None, ' ' + unit)}</small>"
+            )
+        cards.append(
+            f'<article class="metric-card"><div>{html.escape(label)}</div>'
+            f'<strong>{_fmt(latest, " " + unit)}</strong>{detail}</article>'
+        )
+    charts = []
+    for keys, title, unit, fixed_max in (
+        (("batteryTemperatureC", "cpuTemperatureC", "gpuTemperatureC", "skinTemperatureC"), "温度趋势", "°C", None),
+        (("batteryLevelPct",), "电量趋势", "%", 100),
+        (("batteryPowerMw",), "整机电池侧功率", "mW", None),
+    ):
+        values = [value for key in keys for value in series[key] if value is not None]
+        y_min = min([0.0, *values])
+        y_max = fixed_max or max([10.0, *values]) * 1.1
+        chart = _chart(
+            [{"values": series[key], "color": color, "label": POWER_FIELDS[key][0]}
+             for key, color in zip(keys, (FPS_COLOR, CPU_COLOR, NATIVE_COLOR, MEM_COLOR))],
+            times, y_min, y_max, unit,
+        ) if values else '<p class="empty">无可读数据</p>'
+        charts.append(f'<article class="chart-card"><h3>{title}</h3>{chart}</article>')
+    headings = "".join(
+        f"<th>{html.escape(label)} ({html.escape(unit)})</th>" for label, unit in POWER_FIELDS.values()
+    )
+    rows = "".join(
+        f"<tr><td>{_clock(times[index])}</td>"
+        + "".join(f"<td>{_fmt(series[key][index])}</td>" for key in POWER_FIELDS)
+        + "</tr>" for index in range(len(samples))
+    )
+    return (
+        '<section class="table-card"><h2>Android 温度 / 电池 / 功耗</h2>'
+        '<p class="hint">电池约 5s，温控与耗电统计约 30s；数据年龄随样本保存。'
+        '不可读或过期显示 -。电池侧功率为整机电流绝对值 × 电压，不是目标 App 功率；'
+        '充电时反映电池充入功率而非整机总负载。净电量下降可为负值（净充电）。'
+        '会话放电能量仅积分放电状态下间隔不超过 15s 的有效读数，缺失区间不补算，'
+        '请结合覆盖时长使用。系统估算 mAh 为自充电统计起点的累计值，不是本次会话增量，'
+        '目标 UID 可能被多个应用共享；未执行 --reset。'
+        '电池状态：1 未知 / 2 充电 / 3 放电 / 4 未充电 / 5 满电；'
+        '温控：0 正常 / 1 轻度 / 2 中度 / 3 严重 / 4 临界 / 5 紧急 / 6 关机。</p>'
+        f'<div class="metric-grid">{"".join(cards)}</div>'
+        f'<div class="chart-grid">{"".join(charts)}</div>'
+        f'<div class="table-wrap"><table><thead><tr><th>时间</th>{headings}</tr></thead>'
+        f'<tbody>{rows}</tbody></table></div></section>'
+    )
+
+
 def render_report(meta: dict[str, Any], samples: list[dict[str, Any]]) -> str:
     log = get_logger("report")
     device = meta.get("device") or {}
@@ -1091,6 +1155,7 @@ td.mono{{font-family:var(--mono);font-size:11px}}
 {_legend([(color, name) for name, color in mem_legend])}
 <p class="chart-axis-hint">纵轴：内存 (MB) · 横轴：时间 · 点击对齐该时刻</p></div><div><span class="chart-value" id="chart-memory-label" style="color:var(--green)">{' · '.join(mem_bits)}</span><div class="chart-actions"><button type="button" class="chart-scale-btn" data-chart-scale="-1" title="缩小图表" aria-label="缩小图表" disabled>-</button><span class="chart-scale-status">1x</span><button type="button" class="chart-scale-btn" data-chart-scale="1" title="放大图表" aria-label="放大图表">+</button></div></div></div><div class="chart-viewport">{mem_svg}</div></article>
 </div>
+{power_report_section(samples)}
 <section class="table-card">
 <div class="chart-title"><div><p class="eyebrow">SAMPLES</p><h3>采样明细</h3>
 <p class="hint">「场景」和「脚本函数」用于和自动化用例对齐。监测中调用 <code>POST /api/v1/runs/{{runId}}/marker</code>，body 为 {{"scene":"进入大厅","scriptFn":"test_enter_lobby"}}，之后的每个采样点都会带上这两列。</p></div></div>

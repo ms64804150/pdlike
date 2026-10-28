@@ -5,6 +5,8 @@ from __future__ import annotations
 from statistics import mean, median
 from typing import Any, Callable, Optional
 
+from .android_power import POWER_FIELDS
+
 
 def _values(samples: list[dict[str, Any]], key: str) -> list[float]:
     values: list[float] = []
@@ -44,7 +46,7 @@ def summarize(samples: list[dict[str, Any]]) -> dict[str, Any]:
         metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else item
         if not isinstance(metrics, dict) or metrics.get("fps") is None:
             missing += 1
-    return {
+    result = {
         "sampleCount": len(samples),
         "missingRatePct": (missing / len(samples) * 100.0) if samples else None,
         "fps": {
@@ -73,3 +75,14 @@ def summarize(samples: list[dict[str, Any]]) -> dict[str, Any]:
             "peak": max(gpu) if gpu else None,
         },
     }
+    if any(_values(samples, key) for key in POWER_FIELDS):
+        result["power"] = {
+            key: {
+                "last": next(iter(_values(samples[-1:], key)), None),
+                "avg": mean(values) if values else None,
+                "peak": max(values) if values else None,
+            }
+            for key in POWER_FIELDS
+            for values in [_values(samples, key)]
+        }
+    return result

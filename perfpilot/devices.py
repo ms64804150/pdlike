@@ -524,6 +524,10 @@ def capabilities(device: dict[str, Any], bundle: str) -> dict[str, Any]:
     if platform == "android":
         indicators[0]["source"] = "SurfaceFlinger / gfxinfo"
         indicators[3]["source"] = "未接入 Android GPU 计数器"
+        indicators.append({
+            "id": "battery", "label": "温度 / 电池 / 功耗", "state": "degraded",
+            "source": "dumpsys battery / thermalservice / batterystats + 电池节点；按设备权限提供",
+        })
     else:
         indicators[0]["source"] = "DVT graphics"
         indicators[3]["source"] = "DVT Device Utilization"
